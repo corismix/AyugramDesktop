@@ -36,8 +36,13 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include <QFileInfo>
 #include <QStringList>
 
+#include <algorithm>
 #include <deque>
+#include <memory>
+#include <optional>
 #include <set>
+#include <utility>
+#include <vector>
 
 namespace Info::Media::BulkSave {
 
@@ -57,6 +62,7 @@ struct DownloadProgress {
 	int64 ready = 0;
 	int64 total = 0;
 	float64 progress = 0.;
+	bool waitingForExisting = false;
 };
 
 struct Progress {
@@ -137,6 +143,7 @@ private:
 		PhotoData *photo = nullptr;
 		DocumentData *document = nullptr;
 		std::shared_ptr<Data::PhotoMedia> photoView;
+		bool waitingForExisting = false;
 	};
 
 	enum class StartResult {
@@ -270,8 +277,11 @@ private:
 
 	StartResult startItem(FullMsgId id) {
 		const auto item = _session->data().message(id);
+		const auto peer = _session->data().peer(_scope.peerId);
 		if (!item
+			|| !peer->allowsForwarding()
 			|| item->forbidsForward()
+			|| item->forbidsSaving()
 			|| HistoryView::ItemHasTtl(item)) {
 			++_current.skipped;
 			return StartResult::Terminal;
@@ -317,14 +327,18 @@ private:
 				return StartResult::Deferred;
 			}
 			const auto path = documentPath(id, document);
+			const auto waitingForExisting = document->loading();
 			_active.push_back({
 				.id = id,
 				.name = QFileInfo(path).fileName(),
 				.path = path,
 				.date = item->date(),
 				.document = document,
+				.waitingForExisting = waitingForExisting,
 			});
-			document->save(id, path);
+			if (!waitingForExisting) {
+				document->save(id, path);
+			}
 			return StartResult::Started;
 		}
 
@@ -375,11 +389,17 @@ private:
 					saved = i->photoView->saveToFile(i->path);
 					failed = !saved;
 				}
-			} else if (i->document) {
-				if (!i->document->loading()) {
-					saved = QFileInfo::exists(i->path);
-					failed = !saved;
+			} else if (i->document && !i->document->loading()) {
+				if (i->waitingForExisting) {
+					i->waitingForExisting = false;
+					i->document->save(i->id, i->path);
+					if (i->document->loading()) {
+						++i;
+						continue;
+					}
 				}
+				saved = QFileInfo::exists(i->path);
+				failed = !saved;
 			}
 			if (!saved && !failed) {
 				++i;
@@ -424,6 +444,7 @@ private:
 		for (const auto &active : _active) {
 			auto progress = DownloadProgress();
 			progress.name = active.name;
+			progress.waitingForExisting = active.waitingForExisting;
 			if (active.photo) {
 				progress.ready = active.photo->loadOffset();
 				progress.total = active.photo->imageByteSize(
@@ -494,7 +515,9 @@ private:
 	for (auto i = 0; i != count; ++i) {
 		const auto &active = progress.active[i];
 		auto status = QString();
-		if (active.total > 0 && active.ready > 0) {
+		if (active.waitingForExisting) {
+			status = u"finishing existing download…"_q;
+		} else if (active.total > 0 && active.ready > 0) {
 			status = Ui::FormatProgressText(active.ready, active.total);
 		} else if (active.progress > 0.) {
 			status = u"%1%"_q.arg(int(active.progress * 100.));
@@ -554,7 +577,7 @@ inline void Start(
 				&controller->session(),
 				std::move(scope));
 			controller->show(Box([=](not_null<Ui::GenericBox*> box) {
-				box->setTitle(title);
+				box->setTitle(rpl::single(title));
 				box->addRow(object_ptr<Ui::FlatLabel>(
 					box,
 					job->progressValue() | rpl::map([](Progress progress) {
@@ -575,8 +598,14 @@ inline void Start(
 						const auto reveal = progress.lastSavedPath.isEmpty()
 							? destination
 							: progress.lastSavedPath;
+						auto text = TextWithEntities{ CompletionText(progress) };
+						if (progress.saved > 0) {
+							text.append(u'\n').append(tr::link(
+								u"Show in Folder"_q,
+								u"internal:show_bulk_media_saved"_q));
+						}
 						controller->showToast({
-							.text = CompletionText(progress),
+							.text = std::move(text),
 							.filter = [reveal](const auto ...) {
 								File::ShowInFolder(reveal);
 								return false;
