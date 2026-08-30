@@ -30,7 +30,6 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "window/window_session_controller.h"
 
 #include "styles/style_layers.h"
-#include "styles/style_menu_icons.h"
 
 #include <QDir>
 #include <QFile>
@@ -350,7 +349,7 @@ private:
 		}
 		_filling = false;
 
-		checkActive();
+		checkActive(false);
 		if (!_cancelled
 			&& _pending.empty()
 			&& _active.size() < kMaxActive
@@ -362,11 +361,12 @@ private:
 		publish();
 	}
 
-	void checkActive() {
+	void checkActive(bool refill = true) {
 		if (_cancelled || _checking) {
 			return;
 		}
 		_checking = true;
+		auto changed = false;
 		for (auto i = _active.begin(); i != _active.end();) {
 			auto saved = false;
 			auto failed = false;
@@ -385,6 +385,7 @@ private:
 				++i;
 				continue;
 			}
+			changed = true;
 			if (saved) {
 				setFileDates(i->path, i->date);
 				_current.lastSavedPath = i->path;
@@ -397,8 +398,10 @@ private:
 		_checking = false;
 		publish();
 
-		if (!_filling) {
+		if (refill && changed && !_filling) {
 			fillSlots();
+		} else {
+			finishIfDone();
 		}
 	}
 
@@ -500,9 +503,9 @@ private:
 		}
 		lines.push_back(active.name + u" — "_q + status);
 	}
-	if (progress.active.size() > kVisible) {
+	if (int(progress.active.size()) > kVisible) {
 		lines.push_back(u"+ %1 more downloading"_q.arg(
-			progress.active.size() - kVisible));
+			int(progress.active.size()) - kVisible));
 	}
 	return lines.join(u'\n');
 }
@@ -545,22 +548,24 @@ inline void Start(
 				return;
 			}
 
+			const auto title = Title(scope.type);
+			const auto destination = scope.destination;
 			const auto job = std::make_shared<Job>(
 				&controller->session(),
 				std::move(scope));
-			const auto folder = job->progressValue(
-				) | rpl::take(1) | rpl::map([=](const Progress &) {
-					return QString();
-				});
 			controller->show(Box([=](not_null<Ui::GenericBox*> box) {
-				box->setTitle(Title(scope.type));
+				box->setTitle(title);
 				box->addRow(object_ptr<Ui::FlatLabel>(
 					box,
-					job->progressValue() | rpl::map(Summary),
+					job->progressValue() | rpl::map([](Progress progress) {
+						return Summary(std::move(progress));
+					}),
 					st::boxLabel));
 				box->addRow(object_ptr<Ui::FlatLabel>(
 					box,
-					job->progressValue() | rpl::map(ActiveText),
+					job->progressValue() | rpl::map([](Progress progress) {
+						return ActiveText(std::move(progress));
+					}),
 					st::boxLabel));
 				job->progressValue(
 				) | rpl::filter([](const Progress &progress) {
@@ -568,7 +573,7 @@ inline void Start(
 				}) | rpl::take(1) | rpl::on_next([=](const Progress &progress) {
 					if (const auto controller = weak.get()) {
 						const auto reveal = progress.lastSavedPath.isEmpty()
-							? scope.destination
+							? destination
 							: progress.lastSavedPath;
 						controller->showToast({
 							.text = CompletionText(progress),
