@@ -536,7 +536,7 @@ stage('xz', """
     cd xz
     sed -i '' '\\@check_symbol_exists(futimens "sys/types.h;sys/stat.h" HAVE_FUTIMENS)@d' CMakeLists.txt
     CFLAGS="$UNGUARDED" CPPFLAGS="$UNGUARDED" cmake -B build . \\
-        -D CMAKE_OSX_ARCHITECTURES="x86_64;arm64" \\
+        -D CMAKE_OSX_ARCHITECTURES="arm64" \\
         -D CMAKE_INSTALL_PREFIX:STRING=$USED_PREFIX
     cmake --build build
     cmake --install build
@@ -562,7 +562,7 @@ mac:
     CFLAGS="$MIN_VER $UNGUARDED" LDFLAGS="$MIN_VER" ./configure \\
         --static \\
         --prefix=$USED_PREFIX \\
-        --archs="-arch x86_64 -arch arm64"
+        --archs="-arch arm64"
     make $MAKE_THREADS_CNT
     make install
     cd contrib/minizip
@@ -571,12 +571,7 @@ mac:
     make $MAKE_THREADS_CNT
     mkdir out.arm64
     mv .libs/libminizip.a out.arm64
-    make clean
-    CFLAGS="$MIN_VER $UNGUARDED -arch x86_64" CPPFLAGS="$MIN_VER $UNGUARDED -arch x86_64" LDFLAGS="$MIN_VER" ./configure --enable-static --disable-shared --host=x86_64 --prefix=$USED_PREFIX
-    make $MAKE_THREADS_CNT
-    mkdir out.x86_64
-    mv .libs/libminizip.a out.x86_64
-    lipo -create out.arm64/libminizip.a out.x86_64/libminizip.a -output .libs/libminizip.a
+    cp out.arm64/libminizip.a .libs/libminizip.a
     make install
 """)
 
@@ -602,19 +597,7 @@ mac:
         -D ENABLE_SHARED=OFF \\
         -D PNG_SUPPORTED=OFF
     cmake --build build.arm64
-    CFLAGS="-arch x86_64" cmake -B build . \\
-        -D CMAKE_POLICY_VERSION_MINIMUM=3.5 \\
-        -D CMAKE_SYSTEM_NAME=Darwin \\
-        -D CMAKE_SYSTEM_PROCESSOR=x86_64 \\
-        -D CMAKE_BUILD_TYPE=Release \\
-        -D CMAKE_INSTALL_PREFIX=$USED_PREFIX \\
-        -D WITH_JPEG8=ON \\
-        -D ENABLE_SHARED=OFF \\
-        -D PNG_SUPPORTED=OFF
-    cmake --build build
-    lipo -create build.arm64/libjpeg.a build/libjpeg.a -output build/libjpeg.a
-    lipo -create build.arm64/libturbojpeg.a build/libturbojpeg.a -output build/libturbojpeg.a
-    cmake --install build
+    cmake --install build.arm64
 """)
 
 stage('openssl3', """
@@ -654,14 +637,8 @@ mac:
     mkdir out.arm64
     mv libssl.a out.arm64
     mv libcrypto.a out.arm64
-    make clean
-    ./Configure --prefix=$USED_PREFIX no-shared no-tests darwin64-x86_64-cc $MIN_VER
-    make build_libs $MAKE_THREADS_CNT
-    mkdir out.x86_64
-    mv libssl.a out.x86_64
-    mv libcrypto.a out.x86_64
-    lipo -create out.arm64/libcrypto.a out.x86_64/libcrypto.a -output libcrypto.a
-    lipo -create out.arm64/libssl.a out.x86_64/libssl.a -output libssl.a
+    mv out.arm64/libssl.a .
+    mv out.arm64/libcrypto.a .
 """)
 
 stage('opus', """
@@ -676,7 +653,7 @@ win:
     cmake --install out --config Release
 mac:
     CFLAGS="$UNGUARDED" CPPFLAGS="$UNGUARDED" cmake -B build . \\
-        -D CMAKE_OSX_ARCHITECTURES="x86_64;arm64" \\
+        -D CMAKE_OSX_ARCHITECTURES="arm64" \\
         -D CMAKE_INSTALL_PREFIX:STRING=$USED_PREFIX
     cmake --build build
     cmake --install build
@@ -698,7 +675,7 @@ release:
     cd Debug
     cmake ../.. \\
         -D CMAKE_BUILD_TYPE=Debug \\
-        -D CMAKE_OSX_ARCHITECTURES="x86_64;arm64"
+        -D CMAKE_OSX_ARCHITECTURES="arm64"
     cmake --build .
 release:
     cd ..
@@ -706,7 +683,7 @@ release:
     cd Release
     cmake ../.. \\
         -D CMAKE_BUILD_TYPE=Release \\
-        -D CMAKE_OSX_ARCHITECTURES="x86_64;arm64"
+        -D CMAKE_OSX_ARCHITECTURES="arm64"
     cmake --build .
 """)
 
@@ -724,12 +701,7 @@ mac:
     make $MAKE_THREADS_CNT
     mkdir out.arm64
     mv lib/.libs/libiconv.a out.arm64
-    make clean
-    CFLAGS="$MIN_VER $UNGUARDED -arch x86_64" CPPFLAGS="$MIN_VER $UNGUARDED -arch x86_64" LDFLAGS="$MIN_VER" ./configure --enable-static --host=x86_64 --prefix=$USED_PREFIX
-    make $MAKE_THREADS_CNT
-    mkdir out.x86_64
-    mv lib/.libs/libiconv.a out.x86_64
-    lipo -create out.arm64/libiconv.a out.x86_64/libiconv.a -output lib/.libs/libiconv.a
+    cp out.arm64/libiconv.a lib/.libs/libiconv.a
     make install
 """)
 
@@ -802,9 +774,7 @@ mac:
     }
 
     buildOneArch arm64 build.arm64
-    buildOneArch x86_64 build
-
-    lipo -create build.arm64/libdav1d.a build/libdav1d.a -output ${USED_PREFIX}/lib/libdav1d.a
+    mv build.arm64/libdav1d.a ${USED_PREFIX}/lib/
 """)
 
 stage('openh264', """
@@ -860,9 +830,7 @@ mac:
     }
 
     buildOneArch aarch64 build.aarch64
-    buildOneArch x86_64 build.x86_64
-
-    lipo -create build.aarch64/libopenh264.a build.x86_64/libopenh264.a -output ${USED_PREFIX}/lib/libopenh264.a
+    mv build.aarch64/libopenh264.a ${USED_PREFIX}/lib/
 """)
 
 stage('libavif', """
@@ -884,7 +852,7 @@ release:
     cmake --install . --config Release
 mac:
     cmake . \\
-        -D CMAKE_OSX_ARCHITECTURES="x86_64;arm64" \\
+        -D CMAKE_OSX_ARCHITECTURES="arm64" \\
         -D CMAKE_INSTALL_PREFIX:STRING=$USED_PREFIX \\
         -D BUILD_SHARED_LIBS=OFF \\
         -D AVIF_ENABLE_WERROR=OFF \\
@@ -915,7 +883,7 @@ release:
     cmake --install . --config Release
 mac:
     cmake . \\
-        -D CMAKE_OSX_ARCHITECTURES="x86_64;arm64" \\
+        -D CMAKE_OSX_ARCHITECTURES="arm64" \\
         -D CMAKE_INSTALL_PREFIX:STRING=$USED_PREFIX \\
         -D DISABLE_SSE=ON \\
         -D ENABLE_SDL=OFF \\
@@ -956,13 +924,7 @@ mac:
         cmake --build $folder
     }
     buildOneArch arm64 build.arm64
-    buildOneArch x86_64 build
-
-    lipo -create build.arm64/libsharpyuv.a build/libsharpyuv.a -output build/libsharpyuv.a
-    lipo -create build.arm64/libwebp.a build/libwebp.a -output build/libwebp.a
-    lipo -create build.arm64/libwebpdemux.a build/libwebpdemux.a -output build/libwebpdemux.a
-    lipo -create build.arm64/libwebpmux.a build/libwebpmux.a -output build/libwebpmux.a
-    cmake --install build
+    cmake --install build.arm64
 """)
 
 stage('libheif', """
@@ -999,7 +961,7 @@ release:
     cmake --install . --config Release
 mac:
     cmake . \\
-        -D CMAKE_OSX_ARCHITECTURES="x86_64;arm64" \\
+        -D CMAKE_OSX_ARCHITECTURES="arm64" \\
         -D CMAKE_INSTALL_PREFIX:STRING=$USED_PREFIX \\
         -D BUILD_SHARED_LIBS=OFF \\
         -D BUILD_DOCUMENTATION=OFF \\
@@ -1061,7 +1023,7 @@ release:
     cmake --install . --config Release
 mac:
     cmake . \\
-        -D CMAKE_OSX_ARCHITECTURES="x86_64;arm64" \\
+        -D CMAKE_OSX_ARCHITECTURES="arm64" \\
         -D CMAKE_INSTALL_PREFIX:STRING=$USED_PREFIX \\
         ${cmake_defines}
     cmake --build . --config MinSizeRel
@@ -1108,24 +1070,7 @@ mac:
     mkdir out.arm64
     mv libvpx.a out.arm64
 
-    make clean
-
-    ./configure --prefix=$USED_PREFIX \
-    --target=x86_64-darwin20-gcc \
-    --disable-examples \
-    --disable-unit-tests \
-    --disable-tools \
-    --disable-docs \
-    --enable-vp8 \
-    --enable-vp9 \
-    --enable-webm-io
-
-    make $MAKE_THREADS_CNT
-
-    mkdir out.x86_64
-    mv libvpx.a out.x86_64
-
-    lipo -create out.arm64/libvpx.a out.x86_64/libvpx.a -output libvpx.a
+    cp out.arm64/libvpx.a .
 
     make install
 """)
@@ -1159,9 +1104,7 @@ mac:
     }
 
     buildOneArch arm64 build.arm64
-    buildOneArch x86_64 build
-
-    lipo -create build.arm64/liblcms2.a build/liblcms2.a -output ${USED_PREFIX}/lib/liblcms2.a
+    mv build.arm64/liblcms2.a ${USED_PREFIX}/lib/
 """)
 
 stage('nv-codec-headers', """
@@ -1170,6 +1113,7 @@ win:
 """)
 
 stage('regex', """
+
     git clone -b boost-1.83.0 https://github.com/boostorg/regex.git
 """)
 
@@ -1179,7 +1123,6 @@ stage('ffmpeg', """
 win:
 depends:patches/ffmpeg.patch
     git apply ../patches/ffmpeg.patch
-
     SET PATH=%THIRDPARTY_DIR%\\msys64\\usr\\bin;%PATH%
     SET CHERE_INVOKING=enabled_from_arguments
     SET MSYS2_PATH_TYPE=inherit
@@ -1330,25 +1273,12 @@ mac:
     mv libswscale/libswscale.a out.arm64
     mv libavutil/libavutil.a out.arm64
 
-    make clean
-
-    configureFFmpeg x86_64
-    make $MAKE_THREADS_CNT
-
-    mkdir out.x86_64
-    mv libavfilter/libavfilter.a out.x86_64
-    mv libavformat/libavformat.a out.x86_64
-    mv libavcodec/libavcodec.a out.x86_64
-    mv libswresample/libswresample.a out.x86_64
-    mv libswscale/libswscale.a out.x86_64
-    mv libavutil/libavutil.a out.x86_64
-
-    lipo -create out.arm64/libavfilter.a out.x86_64/libavfilter.a -output libavfilter/libavfilter.a
-    lipo -create out.arm64/libavformat.a out.x86_64/libavformat.a -output libavformat/libavformat.a
-    lipo -create out.arm64/libavcodec.a out.x86_64/libavcodec.a -output libavcodec/libavcodec.a
-    lipo -create out.arm64/libswresample.a out.x86_64/libswresample.a -output libswresample/libswresample.a
-    lipo -create out.arm64/libswscale.a out.x86_64/libswscale.a -output libswscale/libswscale.a
-    lipo -create out.arm64/libavutil.a out.x86_64/libavutil.a -output libavutil/libavutil.a
+    mv out.arm64/libavfilter.a libavfilter/
+    mv out.arm64/libavformat.a libavformat/
+    mv out.arm64/libavcodec.a libavcodec/
+    mv out.arm64/libswresample.a libswresample/
+    mv out.arm64/libswscale.a libswscale/
+    mv out.arm64/libavutil.a libavutil/
 
     make install
 """)
@@ -1376,7 +1306,7 @@ mac:
         -D ALSOFT_UTILS=OFF \\
         -D ALSOFT_TESTS=OFF \\
         -D LIBTYPE:STRING=STATIC \\
-        -D CMAKE_OSX_ARCHITECTURES="x86_64;arm64"
+        -D CMAKE_OSX_ARCHITECTURES="arm64"
     cmake --build build
     cmake --install build
 """)
@@ -1453,16 +1383,6 @@ mac:
     ZLIB_LIB=$USED_PREFIX/lib/libz.a
     mkdir out
     cd out
-    mkdir Debug.x86_64
-    cd Debug.x86_64
-    cmake \
-        -DCMAKE_BUILD_TYPE=Debug \
-        -DCMAKE_OSX_ARCHITECTURES=x86_64 \
-        -DCRASHPAD_SPECIAL_TARGET=$SPECIAL_TARGET \
-        -DCRASHPAD_ZLIB_INCLUDE_PATH=$ZLIB_PATH \
-        -DCRASHPAD_ZLIB_LIB_PATH=$ZLIB_LIB ../..
-    cmake --build .
-    cd ..
     mkdir Debug.arm64
     cd Debug.arm64
     cmake \
@@ -1474,19 +1394,9 @@ mac:
     cmake --build .
     cd ..
     mkdir Debug
-    lipo -create Debug.arm64/crashpad_handler Debug.x86_64/crashpad_handler -output Debug/crashpad_handler
-    lipo -create Debug.arm64/libcrashpad_client.a Debug.x86_64/libcrashpad_client.a -output Debug/libcrashpad_client.a
+    cp Debug.arm64/crashpad_handler Debug/
+    cp Debug.arm64/libcrashpad_client.a Debug/
 release:
-    mkdir Release.x86_64
-    cd Release.x86_64
-    cmake \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_OSX_ARCHITECTURES=x86_64 \
-        -DCRASHPAD_SPECIAL_TARGET=$SPECIAL_TARGET \
-        -DCRASHPAD_ZLIB_INCLUDE_PATH=$ZLIB_PATH \
-        -DCRASHPAD_ZLIB_LIB_PATH=$ZLIB_LIB ../..
-    cmake --build .
-    cd ..
     mkdir Release.arm64
     cd Release.arm64
     cmake \
@@ -1498,8 +1408,8 @@ release:
     cmake --build .
     cd ..
     mkdir Release
-    lipo -create Release.arm64/crashpad_handler Release.x86_64/crashpad_handler -output Release/crashpad_handler
-    lipo -create Release.arm64/libcrashpad_client.a Release.x86_64/libcrashpad_client.a -output Release/libcrashpad_client.a
+    cp Release.arm64/crashpad_handler Release/
+    cp Release.arm64/libcrashpad_client.a Release/
 """)
 
 if qt < '6':
@@ -1618,7 +1528,7 @@ mac:
         -no-feature-brotli \
         -no-feature-cxx17_filesystem \
         -platform macx-clang -- \
-        -DCMAKE_OSX_ARCHITECTURES="x86_64;arm64" \
+        -DCMAKE_OSX_ARCHITECTURES="arm64" \
         -DCMAKE_PREFIX_PATH="$USED_PREFIX" \
         -DQT_NO_HANDLE_APPLE_SINGLE_ARCH_CROSS_COMPILING=ON \
         -DQT_SYNC_HEADERS_AT_CONFIGURE_TIME=ON
@@ -1726,21 +1636,6 @@ mac:
     FFMPEG_PATH=$USED_PREFIX/include
     mkdir out
     cd out
-    mkdir Debug.x86_64
-    cd Debug.x86_64
-    cmake \
-        -DCMAKE_BUILD_TYPE=Debug \
-        -DCMAKE_OSX_ARCHITECTURES=x86_64 \
-        -DTG_OWT_BUILD_AUDIO_BACKENDS=OFF \
-        -DTG_OWT_SPECIAL_TARGET=$SPECIAL_TARGET \
-        -DTG_OWT_LIBJPEG_INCLUDE_PATH=$MOZJPEG_PATH \
-        -DTG_OWT_OPENSSL_INCLUDE_PATH=$LIBS_DIR/openssl3/include \
-        -DTG_OWT_OPUS_INCLUDE_PATH=$OPUS_PATH \
-        -DTG_OWT_LIBVPX_INCLUDE_PATH=$LIBVPX_PATH \
-        -DTG_OWT_OPENH264_INCLUDE_PATH=$OPENH264_PATH \
-        -DTG_OWT_FFMPEG_INCLUDE_PATH=$FFMPEG_PATH ../..
-    cmake --build .
-    cd ..
     mkdir Debug.arm64
     cd Debug.arm64
     cmake \
@@ -1757,22 +1652,8 @@ mac:
     cmake --build .
     cd ..
     mkdir Debug
-    lipo -create Debug.arm64/libtg_owt.a Debug.x86_64/libtg_owt.a -output Debug/libtg_owt.a
+    cp Debug.arm64/libtg_owt.a Debug/
 release:
-    mkdir Release.x86_64
-    cd Release.x86_64
-    cmake \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_OSX_ARCHITECTURES=x86_64 \
-        -DTG_OWT_SPECIAL_TARGET=$SPECIAL_TARGET \
-        -DTG_OWT_LIBJPEG_INCLUDE_PATH=$MOZJPEG_PATH \
-        -DTG_OWT_OPENSSL_INCLUDE_PATH=$LIBS_DIR/openssl3/include \
-        -DTG_OWT_OPUS_INCLUDE_PATH=$OPUS_PATH \
-        -DTG_OWT_LIBVPX_INCLUDE_PATH=$LIBVPX_PATH \
-        -DTG_OWT_OPENH264_INCLUDE_PATH=$OPENH264_PATH \
-        -DTG_OWT_FFMPEG_INCLUDE_PATH=$FFMPEG_PATH ../..
-    cmake --build .
-    cd ..
     mkdir Release.arm64
     cd Release.arm64
     cmake \
@@ -1788,7 +1669,7 @@ release:
     cmake --build .
     cd ..
     mkdir Release
-    lipo -create Release.arm64/libtg_owt.a Release.x86_64/libtg_owt.a -output Release/libtg_owt.a
+    cp Release.arm64/libtg_owt.a Release/
 """)
 
 stage('ada', """
@@ -1806,7 +1687,7 @@ mac:
     CFLAGS="$UNGUARDED" CPPFLAGS="$UNGUARDED" cmake -B build . \\
         -D ADA_TESTING=OFF \\
         -D ADA_TOOLS=OFF \\
-        -D CMAKE_OSX_ARCHITECTURES="x86_64;arm64" \\
+        -D CMAKE_OSX_ARCHITECTURES="arm64" \\
         -D CMAKE_INSTALL_PREFIX:STRING=$USED_PREFIX
     cmake --build build
     cmake --install build
@@ -1907,7 +1788,7 @@ mac:
         cd out/$BUILD_CONFIG
         cmake \
             -DCMAKE_BUILD_TYPE=$BUILD_CONFIG \
-            -DCMAKE_OSX_ARCHITECTURES="x86_64;arm64" \
+            -DCMAKE_OSX_ARCHITECTURES="arm64" \
             -DOPENSSL_FOUND=1 \
             -DOPENSSL_INCLUDE_DIR=$LIBS_DIR/openssl3/include \
             -DOPENSSL_SSL_LIBRARY=$LIBS_DIR/openssl3/libssl.a \
