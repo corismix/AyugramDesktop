@@ -19,6 +19,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_photo_media.h"
 #include "data/data_session.h"
 #include "data/data_shared_media.h"
+#include "data/data_file_origin.h"
 #include "history/history_item.h"
 #include "history/view/history_view_context_menu.h"
 #include "lang/lang_keys.h"
@@ -26,6 +27,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/layers/generic_box.h"
 #include "ui/text/format_values.h"
 #include "ui/widgets/labels.h"
+#include "ui/toast/toast.h"
 #include "window/window_controller.h"
 #include "window/window_session_controller.h"
 
@@ -604,9 +606,11 @@ inline void Start(
 								u"Show in Folder"_q,
 								u"internal:show_bulk_media_saved"_q));
 						}
-						controller->showToast({
+						controller->showToast(Ui::Toast::Config{
 							.text = std::move(text),
-							.filter = [reveal](const auto ...) {
+							.filter = [reveal](
+									const ClickHandlerPtr &,
+									Qt::MouseButton) {
 								File::ShowInFolder(reveal);
 								return false;
 							},
