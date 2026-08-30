@@ -131,7 +131,7 @@ The user chooses one destination folder. The operation then discovers and saves 
 3. User chooses **Save all…**.
 4. Show a confirmation/folder-selection flow that clearly names the current media type and scope.
 5. Save into one chosen directory.
-6. Show compact progress while running.
+6. Show a compact progress UI while running that includes aggregate batch progress **and visibly shows the media currently downloading**, with per-active-download progress when the underlying media APIs expose it.
 7. Provide **Cancel**.
 8. On completion, show saved / skipped / failed counts and an action to reveal the destination folder.
 
@@ -141,7 +141,7 @@ Do not require the user to scroll through Shared Media first.
 
 ## Exact MVP boundary
 
-> **MVP STOPS HERE:** save every photo and/or video represented by the current Shared Media tab, from the current peer/topic scope, into one destination folder, with bounded downloading, progress, cancellation, sane filenames, restriction checks, and a completion/error summary.
+> **MVP STOPS HERE:** save every photo and/or video represented by the current Shared Media tab, from the current peer/topic scope, into one destination folder, with bounded downloading, a progress UI that visibly shows active downloads, cancellation, sane filenames, restriction checks, and a completion/error summary.
 
 The following are **explicitly not required for MVP**:
 
@@ -288,7 +288,7 @@ The job's concurrency bound is about memory/lifecycle control, **not** about rep
 
 ---
 
-## 5. Completion tracking
+## 5. Completion and transfer-progress tracking
 
 Do not treat "scheduled" as "saved".
 
@@ -304,9 +304,26 @@ failed
 active
 ```
 
+For each active item, expose enough state for the MVP progress UI to identify the current download and, where supported by Telegram's existing media/download APIs, show transfer progress. Prefer existing reactive/loading progress values rather than building a second byte-accounting layer.
+
+Suggested per-active-item presentation state:
+
+```text
+FullMsgId / stable job item id
+media type
+output/display filename
+loaded bytes or normalized progress, if available
+total bytes, if known
+terminal/error state
+```
+
+The UI does **not** need exact byte progress for a media type if the existing normal save primitive does not expose it cleanly. In that case it must still visibly list the item as actively downloading and use an indeterminate indicator. Do not replace the normal downloader merely to obtain progress metrics.
+
+If several downloads are active concurrently, the UI should be able to show several active rows rather than pretending only one file is downloading.
+
 Use existing downloader/media state signals where possible. `Main::Session::downloaderTaskFinished()` can wake the job to re-check active media, but the job should determine which of its own items actually completed.
 
-Do not cancel or claim completion for unrelated downloads occurring elsewhere in the app.
+Do not cancel, attribute progress from, or claim completion for unrelated downloads occurring elsewhere in the app.
 
 Each item should eventually reach one terminal state:
 
@@ -412,7 +429,7 @@ This entry point automatically gives us the correct current topic vs whole-chat 
 
 ## 10. MVP progress UI
 
-Keep v1 UI small. A dedicated heavyweight download manager is not needed.
+Keep v1 UI small. A dedicated heavyweight download manager is not needed, but **the active downloads themselves must be visible in the progress UI for MVP**.
 
 Minimum state to display:
 
@@ -420,10 +437,32 @@ Minimum state to display:
 Saving media…
 37 / 412 saved
 3 skipped • 1 failed
+
+Downloading
+holiday-video.mp4        46.2 MB / 180.0 MB   26%
+photo_183492.jpg         1.8 MB / 4.1 MB      44%
+clip_2026-08-14.mp4      downloading…
+
 [Cancel]
 ```
 
-If the full total is not yet known, show discovered/saved progress without fabricating a denominator, then switch to a known total when the Shared Media data layer provides one.
+The exact layout should follow existing Telegram/AyuGram UI conventions; the example is behavioral, not a visual specification.
+
+MVP requirements for the active-download area:
+
+- show every item currently owned by the bulk job's active queue, within a reasonable visible-row limit if needed;
+- identify each item by a useful filename or deterministic fallback name;
+- show determinate per-file progress when existing Telegram media/download state exposes loaded/total bytes or an equivalent normalized progress value;
+- otherwise show an indeterminate **downloading…** state rather than hiding the file;
+- update rows reactively while downloads advance;
+- remove or transition a row when that item reaches `saved`, `skipped`, or `failed`;
+- if more items are active than comfortably fit, show a compact overflow indicator such as `+ 6 more downloading` rather than expanding the dialog without bound.
+
+A single aggregate progress bar/count by itself is **not sufficient for MVP**.
+
+Do not add a separate network transfer implementation just to calculate progress. If Telegram's existing downloader exposes only coarse progress for a particular media type, use that coarse progress.
+
+If the full batch total is not yet known, show discovered/saved progress without fabricating a denominator, then switch to a known total when the Shared Media data layer provides one.
 
 At completion:
 
@@ -475,15 +514,17 @@ Acceptance condition: counts and IDs match the current Shared Media tab for:
 
 Connect enumerated IDs to the reusable normal-save primitives.
 
-Add counters, bounded active work, error isolation, and lifecycle cleanup.
+Add counters, per-active-item transfer state, bounded active work, error isolation, and lifecycle cleanup.
 
-Acceptance condition: saving hundreds of mixed photos/videos does not require scrolling and memory does not scale with the whole chat history.
+Acceptance condition: saving hundreds of mixed photos/videos does not require scrolling, memory does not scale with the whole chat history, and the job can report which items are currently downloading plus available per-item progress.
 
 ## Step 4 — Add folder picker + progress/cancel UI
 
 Wire `MediaTabAdapter::fillMenu(...)` to the job.
 
-Acceptance condition: end-to-end MVP is usable without developer tools.
+The progress UI must render the active-download rows described in **MVP progress UI**, not only aggregate counters.
+
+Acceptance condition: end-to-end MVP is usable without developer tools and the user can see which files are actively downloading and their progress where available.
 
 ## Step 5 — Harden filenames, restrictions, migration, failure paths
 
@@ -516,6 +557,9 @@ Cover repeated filenames, deleted messages, protected content, disconnect/reconn
 - [ ] Existing files are not silently overwritten.
 - [ ] Protected/unsupported items are skipped rather than bypassed.
 - [ ] One failed item does not abort the batch.
+- [ ] Progress UI visibly shows media currently downloading.
+- [ ] Each visible active item shows per-file progress when the existing downloader exposes it, otherwise an indeterminate downloading state.
+- [ ] Multiple concurrent active downloads can be represented without unbounded UI growth.
 - [ ] Cancel stops discovery/new scheduling.
 - [ ] Completion summary reports saved/skipped/failed.
 
@@ -528,12 +572,14 @@ Cover repeated filenames, deleted messages, protected content, disconnect/reconn
 - [ ] Queue size is bounded.
 - [ ] Whole history is not materialized into `HistoryItem`/media objects at once.
 - [ ] The job does not depend on the media widget remaining alive.
+- [ ] Active-download progress is derived from existing Telegram media/downloader state rather than a parallel transfer implementation.
 - [ ] Existing **Download selected** still works.
 
 ### Performance
 
 - [ ] Large-video throughput is in the same general class as normal **Save As**, not Export Chat History.
 - [ ] Hundreds/thousands of items do not cause unbounded memory growth.
+- [ ] Progress updates do not materially degrade download throughput or UI responsiveness.
 - [ ] UI remains responsive during discovery and download.
 
 ---
@@ -697,8 +743,10 @@ When handing this plan to Codex/another agent, keep these constraints explicit:
 6. **Do not bypass copy/TTL restrictions.** Match existing UI behavior.
 7. **Do not make the job depend on a widget lifetime.** Capture a value-like scope.
 8. **Do not silently overwrite destination files.** Use existing safe naming helpers.
-9. **Keep upstream/AyuGram rebases in mind.** Prefer additive files and small touch points in heavily modified upstream files.
-10. **Stop at the MVP boundary before adding filters or more media types.**
+9. **The MVP progress UI must show active downloads.** Aggregate counts alone are insufficient; expose per-active-item identity and existing downloader progress where available.
+10. **Do not create a second downloader merely for progress reporting.** Use existing Telegram media/download state; indeterminate active rows are acceptable where precise byte progress is not exposed.
+11. **Keep upstream/AyuGram rebases in mind.** Prefer additive files and small touch points in heavily modified upstream files.
+12. **Stop at the MVP boundary before adding filters or more media types.**
 
 ---
 
@@ -706,6 +754,6 @@ When handing this plan to Codex/another agent, keep these constraints explicit:
 
 The core success test is simple:
 
-> From a large chat/channel/topic, a user can save all photos and/or videos in one operation, without scrolling/selecting them manually, and downloads run through the same normal Telegram media pipeline that makes manual Save As substantially faster than Export Chat History.
+> From a large chat/channel/topic, a user can save all photos and/or videos in one operation, without scrolling/selecting them manually, see which media are actively downloading and their progress where available, and downloads run through the same normal Telegram media pipeline that makes manual Save As substantially faster than Export Chat History.
 
 Everything after that is enhancement work.
