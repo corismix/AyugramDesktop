@@ -8,6 +8,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "info/media/info_media_widget.h"
 
 #include "history/history.h"
+#include "info/media/info_media_bulk_save.h"
 #include "info/media/info_media_inner_widget.h"
 #include "info/info_controller.h"
 #include "data/data_session.h"
@@ -195,6 +196,23 @@ void Widget::fillTopBarMenu(const Ui::Menu::MenuCallback &addAction) {
 			},
 		});
 	}, &st::menuIconSchedule);
+
+	const auto peer = controller()->key().peer();
+	const auto topic = controller()->topic();
+	const auto sublist = controller()->sublist();
+	const auto bulkSaveScope = BulkSave::Scope{
+		.peerId = peer->id,
+		.topicRootId = topic ? topic->rootId() : MsgId(),
+		.monoforumPeerId = sublist
+			? sublist->sublistPeer()->id
+			: PeerId(),
+		.migratedPeerId = controller()->migratedPeerId(),
+		.type = type,
+	};
+	const auto parentController = controller()->parentController();
+	addAction(u"Save all…"_q, [=] {
+		BulkSave::Start(parentController, bulkSaveScope);
+	}, &st::menuIconDownload);
 }
 
 bool Widget::processZoomKey(not_null<QKeyEvent*> e) {
