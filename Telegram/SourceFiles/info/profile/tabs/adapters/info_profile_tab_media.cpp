@@ -15,6 +15,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "dialogs/dialogs_key.h"
 #include "history/history.h"
 #include "info/info_controller.h"
+#include "info/media/info_media_bulk_save.h"
 #include "info/media/info_media_buttons.h"
 #include "info/media/info_media_empty_widget.h"
 #include "info/media/info_media_list_widget.h"
@@ -22,14 +23,15 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "info/profile/tabs/adapters/info_profile_tab_sub_controller.h"
 #include "info/profile/tabs/info_profile_tab_skeleton.h"
 #include "lang/lang_keys.h"
-#include "ui/text/text_utilities.h"
 #include "ui/effects/animations.h"
 #include "ui/painter.h"
 #include "ui/rect.h"
 #include "ui/rp_widget.h"
+#include "ui/text/text_utilities.h"
 #include "ui/ui_utility.h"
 #include "ui/widgets/menu/menu_add_action_callback.h"
 #include "window/window_session_controller.h"
+
 #include "styles/style_info.h"
 #include "styles/style_menu_icons.h"
 
@@ -278,6 +280,19 @@ private:
 					}),
 			});
 		}, &st::menuIconSchedule);
+
+		const auto bulkSaveScope = Media::BulkSave::Scope{
+			.peerId = peer->id,
+			.topicRootId = _topicRootId,
+			.monoforumPeerId = _monoforumPeerId,
+			.migratedPeerId = _context.migrated
+				? _context.migrated->id
+				: PeerId(),
+			.type = type,
+		};
+		addAction(u"Save all…"_q, [=] {
+			Media::BulkSave::Start(controller, bulkSaveScope);
+		}, &st::menuIconDownload);
 	}
 
 	const MediaTabContext _context;
