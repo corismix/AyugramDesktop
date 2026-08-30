@@ -79,7 +79,7 @@ struct Progress {
 	bool cancelled = false;
 };
 
-class Job final {
+class Job final : public std::enable_shared_from_this<Job> {
 public:
 	Job(not_null<Main::Session*> session, Scope scope)
 	: _session(session)
@@ -92,21 +92,28 @@ public:
 		}
 		_started = true;
 
+		const auto weak = weak_from_this();
 		_session->data().photoLoadProgress(
-		) | rpl::on_next([=](not_null<PhotoData*> photo) {
-			if (hasActivePhoto(photo)) {
-				checkActive();
+		) | rpl::on_next([weak](not_null<PhotoData*> photo) {
+			if (const auto job = weak.lock()) {
+				if (job->hasActivePhoto(photo)) {
+					job->checkActive();
+				}
 			}
 		}, _lifetime);
 		_session->data().documentLoadProgress(
-		) | rpl::on_next([=](not_null<DocumentData*> document) {
-			if (hasActiveDocument(document)) {
-				checkActive();
+		) | rpl::on_next([weak](not_null<DocumentData*> document) {
+			if (const auto job = weak.lock()) {
+				if (job->hasActiveDocument(document)) {
+					job->checkActive();
+				}
 			}
 		}, _lifetime);
 		_session->downloaderTaskFinished(
-		) | rpl::on_next([=] {
-			checkActive();
+		) | rpl::on_next([weak] {
+			if (const auto job = weak.lock()) {
+				job->checkActive();
+			}
 		}, _lifetime);
 
 		loadPage(ServerMaxMsgId - 1);
@@ -237,14 +244,17 @@ private:
 				_scope.type),
 			kPageSize,
 			1);
+		const auto weak = weak_from_this();
 		std::move(viewer
 		) | rpl::filter([](const SparseIdsMergedSlice &slice) {
 			return slice.fullCount().has_value()
 				&& slice.skippedBefore().has_value()
 				&& slice.skippedAfter().has_value();
-		}) | rpl::take(1) | rpl::on_next([=](SparseIdsMergedSlice slice) {
-			_pageLoading = false;
-			handlePage(std::move(slice));
+		}) | rpl::take(1) | rpl::on_next([weak](SparseIdsMergedSlice slice) {
+			if (const auto job = weak.lock()) {
+				job->_pageLoading = false;
+				job->handlePage(std::move(slice));
+			}
 		}, _pageLifetime);
 	}
 
