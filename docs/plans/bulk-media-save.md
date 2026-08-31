@@ -149,7 +149,8 @@ The following are **explicitly not required for MVP**:
 - a custom filter dialog;
 - arbitrary date ranges;
 - "all topics" recursion from inside a forum;
-- GIFs, generic files, music, voice messages, round videos, or stickers;
+- GIFs, generic files, music, voice messages, round videos, or stickers (out
+  of scope for this feature);
 - pause/resume;
 - persistence across app restarts;
 - a download-job history screen;
@@ -623,7 +624,7 @@ BulkSave::Request
 │   ├── peerId / topicRootId / monoforumPeerId / migratedPeerId
 │   └── discovery media-type mask
 ├── SelectionOptions
-│   ├── requested media kinds
+│   ├── photos and videos (the complete supported media set)
 │   ├── optional inclusive date interval
 │   ├── optional sender and size limits
 │   └── current topic or explicitly selected all-topics scope
@@ -664,11 +665,11 @@ must keep the selected root in every returned path and use the existing safe
 collision helpers. `Job` continues to own queue size, reactive progress,
 terminal counters, cancellation, and lifecycle cleanup.
 
-The discovery media-type mask should be broad enough to find candidates, while
-the adapter applies the exact requested kind and filters after resolving the
+The discovery media-type mask is limited to `Photo`, `Video`, and `PhotoVideo`.
+The adapter applies the exact requested kind and filters after resolving the
 message. This preserves the current behavior for albums, deleted messages,
-restrictions, and remotely loaded slices, and avoids assuming all documents in
-a Shared Media bucket are interchangeable.
+restrictions, and remotely loaded slices, and avoids enumerating unsupported
+Telegram media categories.
 
 ## Phase 3 — Selection filters and destination layouts
 
@@ -725,28 +726,16 @@ Do not add filename templates, “only not already saved,” all-topic recursion
 or content hashing in this phase. Each changes identity, scope, or persistence
 semantics and belongs to a later bounded increment.
 
-## Phase 4 — Additional media kinds
+## Explicitly out of scope
 
-Add media kinds one at a time through explicit adapters, in this order:
+Bulk saving is intentionally limited to the image/video support implemented in
+the MVP and Phase 2. GIFs, animations, generic files, documents, music, audio,
+voice messages, round videos, stickers, and any future Telegram media category
+are not planned extensions of this feature. Do not add adapter cases,
+enumeration paths, UI checkboxes, filename rules, or persistence schema for
+those types while implementing the phases below.
 
-1. GIFs / animations;
-2. generic files;
-3. music/audio;
-4. voice messages;
-5. round videos.
-
-For each kind, first establish the matching `Storage::SharedMediaType`, the
-actual `HistoryItem`/`DocumentData` predicates, normal save call, safe fallback
-extension, restriction behavior, and whether the media belongs in an existing
-or new UI category. Then add one `MediaAdapter` case and its opt-in checkbox.
-
-Do not treat every `DocumentData` as a video or generic file merely because it
-is downloadable. Voice and round-video handling in particular needs separate
-macOS acceptance: output extension, Quick Look/player behavior, cancellation,
-and progress must be verified before that checkbox is enabled. The existing
-Photos/Videos defaults must remain unchanged.
-
-## Phase 5 — Job control and resumability
+## Phase 4 — Job control and resumability
 
 Implement retry before persistence. A completed job should retain a bounded
 failure record containing `FullMsgId`, media kind, and failure category, so
@@ -780,7 +769,7 @@ Only after this behavior is stable, add restart persistence:
 A small jobs surface can then show active, paused, completed, and failed jobs.
 It should subscribe to job progress; it must not own another save queue.
 
-## Phase 6 — Manifest-backed duplicate awareness
+## Phase 5 — Manifest-backed duplicate awareness
 
 Introduce a versioned manifest inside the destination root only after job
 persistence has a stable source-ID model. It maps a source identity
@@ -799,7 +788,7 @@ part of the normal bulk-save path. It can be expensive enough to erase the
 download-throughput benefit, especially for large videos. Manifest writes must
 be atomic or journaled so a crash cannot mark an incomplete file as saved.
 
-## Phase 7 — Optional Export Chat History investigation
+## Phase 6 — Optional Export Chat History investigation
 
 Faster **Export Chat History** remains a separate project. If it is pursued,
 first measure takeout concurrency, CDN handling, Premium/non-Premium behavior,
