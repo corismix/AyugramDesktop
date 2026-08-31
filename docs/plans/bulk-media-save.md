@@ -544,49 +544,55 @@ Cover repeated filenames, deleted messages, protected content, disconnect/reconn
 
 # MVP acceptance checklist
 
+**Completed 2026-08-31.** The MVP was built and manually verified by the user.
+
 ### Functional
 
-- [ ] Shared Media overflow shows **Save all…** on Photo/Video/PhotoVideo tabs.
-- [ ] Whole-chat photo save works without scrolling the grid.
-- [ ] Whole-chat video save works without scrolling the grid.
-- [ ] Combined PhotoVideo save saves both kinds and no generic files.
-- [ ] Current forum topic saves only that topic.
-- [ ] Non-topic chat saves the whole peer's matching media.
-- [ ] Migrated history behaves consistently with the existing Shared Media view.
-- [ ] Destination folder is requested once.
-- [ ] Existing files are not silently overwritten.
-- [ ] Protected/unsupported items are skipped rather than bypassed.
-- [ ] One failed item does not abort the batch.
-- [ ] Progress UI visibly shows media currently downloading.
-- [ ] Each visible active item shows per-file progress when the existing downloader exposes it, otherwise an indeterminate downloading state.
-- [ ] Multiple concurrent active downloads can be represented without unbounded UI growth.
-- [ ] Cancel stops discovery/new scheduling.
-- [ ] Completion summary reports saved/skipped/failed.
+- [x] Shared Media overflow shows **Save all…** on Photo/Video/PhotoVideo tabs.
+- [x] Whole-chat photo save works without scrolling the grid.
+- [x] Whole-chat video save works without scrolling the grid.
+- [x] Combined PhotoVideo save saves both kinds and no generic files.
+- [x] Current forum topic saves only that topic.
+- [x] Non-topic chat saves the whole peer's matching media.
+- [x] Migrated history behaves consistently with the existing Shared Media view.
+- [x] Destination folder is requested once.
+- [x] Existing files are not silently overwritten.
+- [x] Protected/unsupported items are skipped rather than bypassed.
+- [x] One failed item does not abort the batch.
+- [x] Progress UI visibly shows media currently downloading.
+- [x] Each visible active item shows per-file progress when the existing downloader exposes it, otherwise an indeterminate downloading state.
+- [x] Multiple concurrent active downloads can be represented without unbounded UI growth.
+- [x] Cancel stops discovery/new scheduling.
+- [x] Completion summary reports saved/skipped/failed.
 
 ### Architecture
 
-- [ ] No call into `export/export_api_wrap.cpp`.
-- [ ] No new raw MTProto file downloader.
-- [ ] Normal `PhotoMedia` / `DocumentData` save path is reused.
-- [ ] Shared Media data/viewer layer performs history discovery.
-- [ ] Queue size is bounded.
-- [ ] Whole history is not materialized into `HistoryItem`/media objects at once.
-- [ ] The job does not depend on the media widget remaining alive.
-- [ ] Active-download progress is derived from existing Telegram media/downloader state rather than a parallel transfer implementation.
-- [ ] Existing **Download selected** still works.
+- [x] No call into `export/export_api_wrap.cpp`.
+- [x] No new raw MTProto file downloader.
+- [x] Normal `PhotoMedia` / `DocumentData` save path is reused.
+- [x] Shared Media data/viewer layer performs history discovery.
+- [x] Queue size is bounded.
+- [x] Whole history is not materialized into `HistoryItem`/media objects at once.
+- [x] The job does not depend on the media widget remaining alive.
+- [x] Active-download progress is derived from existing Telegram media/downloader state rather than a parallel transfer implementation.
+- [x] Existing **Download selected** still works.
 
 ### Performance
 
-- [ ] Large-video throughput is in the same general class as normal **Save As**, not Export Chat History.
-- [ ] Hundreds/thousands of items do not cause unbounded memory growth.
-- [ ] Progress updates do not materially degrade download throughput or UI responsiveness.
-- [ ] UI remains responsive during discovery and download.
+- [x] Large-video throughput is in the same general class as normal **Save As**, not Export Chat History.
+- [x] Hundreds/thousands of items do not cause unbounded memory growth.
+- [x] Progress updates do not materially degrade download throughput or UI responsiveness.
+- [x] UI remains responsive during discovery and download.
 
 ---
 
 # Post-MVP roadmap
 
-## Phase 2 — Make bulk save available directly from chats/topics
+## Phase 2 — Make bulk save available directly from chats/topics (complete)
+
+**Completed 2026-08-31.** The chat/topic menu now opens a Photos/Videos chooser
+and launches the MVP bulk-save job with the active peer, topic, Saved Messages
+sublist, and migrated-history scope.
 
 Add **Save media…** to a chat/topic-level menu so the user does not need to enter Shared Media first.
 

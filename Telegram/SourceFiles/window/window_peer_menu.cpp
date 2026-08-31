@@ -92,6 +92,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "info/channel_statistics/boosts/info_boosts_widget.h"
 #include "info/channel_statistics/earn/info_channel_earn_widget.h"
 #include "info/channel_statistics/earn/earn_icons.h"
+#include "info/media/info_media_bulk_save.h"
 #include "info/profile/info_profile_cover.h"
 #include "info/profile/info_profile_values.h"
 #include "info/statistics/info_statistics_widget.h"
@@ -330,6 +331,7 @@ private:
 	void addDirectMessages();
 	void addToggleTopicClosed();
 	void addExportChat();
+	void addSaveMedia();
 	void addTranslate();
 	void addReport();
 	void addNewContact();
@@ -1030,6 +1032,62 @@ void Filler::addExportChat() {
 		tr::lng_profile_export_chat(tr::now),
 		[=] { PeerMenuExportChat(navigation, peer); },
 		&st::menuIconExport);
+}
+
+void Filler::addSaveMedia() {
+	if (!_peer) {
+		return;
+	}
+	const auto peer = _peer;
+	const auto topicRootId = _topic ? _topic->rootId() : MsgId();
+	const auto monoforumPeerId = _sublist
+		? _sublist->sublistPeer()->id
+		: PeerId();
+	const auto migrated = (topicRootId || monoforumPeerId)
+		? nullptr
+		: peer->migrateFrom();
+	const auto migratedPeerId = migrated
+		? migrated->id
+		: PeerId();
+	const auto controller = _controller;
+	_addAction(tr::lng_bulk_media_save_action(tr::now), [=] {
+		controller->show(Box([=](not_null<Ui::GenericBox*> box) {
+			box->setTitle(tr::lng_bulk_media_save());
+			const auto photos = box->addRow(object_ptr<Ui::Checkbox>(
+				box,
+				tr::lng_media_type_photos(tr::now),
+				true,
+				st::defaultBoxCheckbox));
+			const auto videos = box->addRow(object_ptr<Ui::Checkbox>(
+				box,
+				tr::lng_media_type_videos(tr::now),
+				true,
+				st::defaultBoxCheckbox));
+			box->addButton(tr::lng_settings_save(), [=] {
+				const auto savePhotos = photos->checked();
+				const auto saveVideos = videos->checked();
+				if (!savePhotos && !saveVideos) {
+					return;
+				}
+				const auto type = savePhotos
+					? (saveVideos
+						? Info::Media::BulkSave::Type::PhotoVideo
+						: Info::Media::BulkSave::Type::Photo)
+					: Info::Media::BulkSave::Type::Video;
+				box->closeBox();
+				Info::Media::BulkSave::Start(controller, {
+					.peerId = peer->id,
+					.topicRootId = topicRootId,
+					.monoforumPeerId = monoforumPeerId,
+					.migratedPeerId = migratedPeerId,
+					.type = type,
+				});
+			});
+			box->addButton(tr::lng_cancel(), [=] {
+				box->closeBox();
+			});
+		}));
+	}, &st::menuIconDownload);
 }
 
 void Filler::addTranslate() {
@@ -1891,6 +1949,7 @@ void Filler::fillHistoryActions() {
 	addToggleNoForwards();
 	addViewDiscussion();
 	addDirectMessages();
+	addSaveMedia();
 	addExportChat();
 	addTranslate();
 	addReport();
@@ -1920,6 +1979,7 @@ void Filler::fillProfileActions() {
 	AyuUi::AddShadowBanAction(_peer, _addAction);
 	addViewDiscussion();
 	addDirectMessages();
+	addSaveMedia();
 	addExportChat();
 	addToggleNoForwards();
 	addToggleFolder();
