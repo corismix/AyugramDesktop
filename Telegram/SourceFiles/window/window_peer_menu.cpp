@@ -1051,42 +1051,17 @@ void Filler::addSaveMedia() {
 		: PeerId();
 	const auto controller = _controller;
 	_addAction(tr::lng_bulk_media_save_action(tr::now), [=] {
-		controller->show(Box([=](not_null<Ui::GenericBox*> box) {
-			box->setTitle(tr::lng_bulk_media_save());
-			const auto photos = box->addRow(object_ptr<Ui::Checkbox>(
-				box,
-				tr::lng_media_type_photos(tr::now),
-				true,
-				st::defaultBoxCheckbox));
-			const auto videos = box->addRow(object_ptr<Ui::Checkbox>(
-				box,
-				tr::lng_media_type_videos(tr::now),
-				true,
-				st::defaultBoxCheckbox));
-			box->addButton(tr::lng_settings_save(), [=] {
-				const auto savePhotos = photos->checked();
-				const auto saveVideos = videos->checked();
-				if (!savePhotos && !saveVideos) {
-					return;
-				}
-				const auto type = savePhotos
-					? (saveVideos
-						? Info::Media::BulkSave::Type::PhotoVideo
-						: Info::Media::BulkSave::Type::Photo)
-					: Info::Media::BulkSave::Type::Video;
-				box->closeBox();
-				Info::Media::BulkSave::Start(controller, {
-					.peerId = peer->id,
-					.topicRootId = topicRootId,
-					.monoforumPeerId = monoforumPeerId,
-					.migratedPeerId = migratedPeerId,
-					.type = type,
-				});
-			});
-			box->addButton(tr::lng_cancel(), [=] {
-				box->closeBox();
-			});
-		}));
+		Info::Media::BulkSave::Start(controller, {
+			.scope = {
+				.peerId = peer->id,
+				.topicRootId = topicRootId,
+				.monoforumPeerId = monoforumPeerId,
+				.migratedPeerId = migratedPeerId,
+			},
+			.types = Storage::SharedMediaTypesMask{}
+				.added(Info::Media::BulkSave::Type::Photo)
+				.added(Info::Media::BulkSave::Type::Video),
+		});
 	}, &st::menuIconDownload);
 }
 

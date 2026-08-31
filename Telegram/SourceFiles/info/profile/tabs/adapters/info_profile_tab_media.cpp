@@ -281,17 +281,19 @@ private:
 			});
 		}, &st::menuIconSchedule);
 
-		const auto bulkSaveScope = Media::BulkSave::Scope{
-			.peerId = peer->id,
-			.topicRootId = _topicRootId,
-			.monoforumPeerId = _monoforumPeerId,
-			.migratedPeerId = _context.migrated
+		const auto bulkSaveRequest = Media::BulkSave::Request{
+			.scope = {
+				.peerId = peer->id,
+				.topicRootId = _topicRootId,
+				.monoforumPeerId = _monoforumPeerId,
+				.migratedPeerId = _context.migrated
 				? _context.migrated->id
 				: PeerId(),
-			.type = type,
+			},
+			.types = Media::BulkSave::TypesFor(type),
 		};
 		addAction(u"Save all…"_q, [=] {
-			Media::BulkSave::Start(controller, bulkSaveScope);
+			Media::BulkSave::Start(controller, bulkSaveRequest);
 		}, &st::menuIconDownload);
 	}
 

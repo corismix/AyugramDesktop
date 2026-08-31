@@ -200,18 +200,20 @@ void Widget::fillTopBarMenu(const Ui::Menu::MenuCallback &addAction) {
 	const auto peer = controller()->key().peer();
 	const auto topic = controller()->topic();
 	const auto sublist = controller()->sublist();
-	const auto bulkSaveScope = BulkSave::Scope{
-		.peerId = peer->id,
-		.topicRootId = topic ? topic->rootId() : MsgId(),
-		.monoforumPeerId = sublist
+	const auto bulkSaveRequest = BulkSave::Request{
+		.scope = {
+			.peerId = peer->id,
+			.topicRootId = topic ? topic->rootId() : MsgId(),
+			.monoforumPeerId = sublist
 			? sublist->sublistPeer()->id
 			: PeerId(),
-		.migratedPeerId = controller()->migratedPeerId(),
-		.type = type,
+			.migratedPeerId = controller()->migratedPeerId(),
+		},
+		.types = BulkSave::TypesFor(type),
 	};
 	const auto parentController = controller()->parentController();
 	addAction(u"Save all…"_q, [=] {
-		BulkSave::Start(parentController, bulkSaveScope);
+		BulkSave::Start(parentController, bulkSaveRequest);
 	}, &st::menuIconDownload);
 }
 
