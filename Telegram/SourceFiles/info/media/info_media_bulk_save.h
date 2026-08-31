@@ -46,10 +46,15 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include <QFileInfo>
 #include <QDate>
 #include <QDataStream>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QSaveFile>
+#include <QMutex>
 
 #include <algorithm>
 #include <deque>
 #include <memory>
+#include <map>
 #include <optional>
 #include <set>
 #include <utility>
@@ -132,6 +137,7 @@ struct Failure {
 struct Progress {
 	int discovered = 0;
 	int saved = 0;
+	int alreadySaved = 0;
 	int skipped = 0;
 	int filteredOut = 0;
 	int failed = 0;
@@ -144,6 +150,165 @@ struct Progress {
 	bool finished = false;
 	bool cancelled = false;
 	State state = State::Running;
+};
+
+class Manifest final {
+public:
+	struct Entry {
+		QString path;
+		qint64 size = 0;
+		qint64 modified = 0;
+	};
+
+	explicit Manifest(QString root)
+	: _root(QDir::cleanPath(std::move(root)))
+	, _path(QDir(_root).filePath(u".ayu-bulk-save-manifest.json"_q)) {
+	}
+
+	void load() {
+		_entries.clear();
+		_loaded = true;
+		auto file = QFile(_path);
+		if (!file.exists()) {
+			_valid = true;
+			return;
+		}
+		if (!file.open(QIODevice::ReadOnly)) {
+			_valid = false;
+			return;
+		}
+		QJsonParseError error;
+		const auto document = QJsonDocument::fromJson(file.readAll(), &error);
+		if (error.error != QJsonParseError::NoError
+			|| !document.isObject()) {
+			_valid = false;
+			return;
+		}
+		const auto object = document.object();
+		if (object.value(u"version"_q).toInt() != 1
+			|| !object.value(u"entries"_q).isObject()) {
+			_valid = false;
+			return;
+		}
+		const auto entries = object.value(u"entries"_q).toObject();
+		for (auto i = entries.begin(); i != entries.end(); ++i) {
+			const auto value = i.value().toObject();
+			const auto relative = value.value(u"path"_q).toString();
+			bool sizeOk = false;
+			const auto size = value.value(u"size"_q)
+				.toString().toLongLong(&sizeOk);
+			if (value.value(u"status"_q).toString() != u"complete"_q
+				|| !validRelativePath(relative)
+				|| !sizeOk
+				|| size < 0) {
+				continue;
+			}
+			bool modifiedOk = false;
+			const auto modified = value.value(u"modified"_q)
+				.toString().toLongLong(&modifiedOk);
+			_entries.emplace(i.key(), Entry{
+				.path = relative,
+				.size = size,
+				.modified = modifiedOk ? modified : 0,
+			});
+		}
+		_valid = true;
+	}
+
+	[[nodiscard]] bool contains(
+			const QString &key) const {
+		if (!_loaded) {
+			return false;
+		}
+		const auto i = _entries.find(key);
+		if (i == _entries.end()) {
+			return false;
+		}
+		const auto path = absolutePath(i->second.path);
+		return !path.isEmpty()
+			&& QFileInfo::exists(path)
+			&& QFileInfo(path).size() == i->second.size;
+	}
+
+	void record(const QString &key, const QString &path) {
+		const auto relative = relativePath(path);
+		if (relative.isEmpty() || !QFileInfo::exists(path)) {
+			return;
+		}
+		static QMutex mutex;
+		const QMutexLocker lock(&mutex);
+		Manifest current(_root);
+		current.load();
+		if (!current._valid) {
+			return;
+		}
+		current._entries[key] = Entry{
+			.path = relative,
+			.size = QFileInfo(path).size(),
+			.modified = QFileInfo(path).lastModified().toSecsSinceEpoch(),
+		};
+		if (!current.write()) {
+			return;
+		}
+		_entries = std::move(current._entries);
+		_valid = true;
+		_loaded = true;
+	}
+
+private:
+	[[nodiscard]] bool validRelativePath(const QString &path) const {
+		if (path.isEmpty() || QFileInfo(path).isAbsolute()) {
+			return false;
+		}
+		return !absolutePath(path).isEmpty();
+	}
+
+	[[nodiscard]] QString absolutePath(const QString &relative) const {
+		if (relative.isEmpty() || QFileInfo(relative).isAbsolute()) {
+			return QString();
+		}
+		const auto root = QDir::cleanPath(_root);
+		const auto path = QDir::cleanPath(QDir(root).filePath(relative));
+		return (path == root || path.startsWith(root + '/'))
+			? path
+			: QString();
+	}
+
+	[[nodiscard]] QString relativePath(const QString &path) const {
+		const auto absolute = QDir::cleanPath(path);
+		const auto root = QDir::cleanPath(_root);
+		if (absolute != root && !absolute.startsWith(root + '/')) {
+			return QString();
+		}
+		const auto relative = QDir(root).relativeFilePath(absolute);
+		return validRelativePath(relative) ? relative : QString();
+	}
+
+	[[nodiscard]] bool write() const {
+		QJsonObject entries;
+		for (const auto &[key, entry] : _entries) {
+			entries.insert(key, QJsonObject{
+				{ u"path"_q, entry.path },
+				{ u"size"_q, QString::number(entry.size) },
+				{ u"status"_q, u"complete"_q },
+				{ u"modified"_q, QString::number(entry.modified) },
+			});
+		}
+		const auto document = QJsonDocument(QJsonObject{
+			{ u"version"_q, 1 },
+			{ u"entries"_q, entries },
+		});
+		QSaveFile file(_path);
+		return file.open(QIODevice::WriteOnly)
+			&& file.write(document.toJson(QJsonDocument::Compact)) != -1
+			&& file.commit();
+	}
+
+	QString _root;
+	QString _path;
+	std::map<QString, Entry> _entries;
+	bool _loaded = false;
+	bool _valid = false;
 };
 
 [[nodiscard]] inline QString Title(
@@ -166,7 +331,7 @@ struct Progress {
 
 [[nodiscard]] inline QString ProgressTitle(const Progress &progress) {
 	if (progress.finished) {
-		if (!progress.saved && progress.failed) {
+		if (!progress.saved && !progress.alreadySaved && progress.failed) {
 			return u"No media was saved"_q;
 		}
 		return progress.cancelled
@@ -184,11 +349,11 @@ struct Progress {
 	}
 	if (progress.total) {
 		return u"Saving %1 of %2 items"_q
-			.arg(progress.saved)
+			.arg(progress.saved + progress.alreadySaved)
 			.arg(*progress.total);
 	}
 	return progress.discovered
-		? u"Saving %1 items"_q.arg(progress.saved)
+		? u"Saving %1 items"_q.arg(progress.saved + progress.alreadySaved)
 		: u"Finding media…"_q;
 }
 
@@ -199,11 +364,13 @@ struct Progress {
 	} else if (!progress.finished && !progress.stopping) {
 		details = u"%1 discovered"_q.arg(progress.discovered);
 	}
-	if (progress.skipped || progress.filteredOut || progress.failed) {
+	if (progress.alreadySaved || progress.skipped
+		|| progress.filteredOut || progress.failed) {
 		if (!details.isEmpty()) {
 			details += u" • "_q;
 		}
-		details += u"%1 skipped • %2 filtered • %3 failed"_q
+		details += u"%1 already saved • %2 skipped • %3 filtered • %4 failed"_q
+			.arg(progress.alreadySaved)
 			.arg(progress.skipped)
 			.arg(progress.filteredOut)
 			.arg(progress.failed);
@@ -314,7 +481,8 @@ private:
 		}
 		return std::clamp(
 			float64(
-				_progress.saved + _progress.skipped + _progress.failed)
+				_progress.saved + _progress.alreadySaved
+				+ _progress.skipped + _progress.failed)
 				/ *_progress.total,
 			0.,
 			1.);
@@ -427,6 +595,7 @@ public:
 	: _session(session)
 	, _controller(controller ? base::make_weak(controller) : nullptr)
 	, _request(std::move(request))
+	, _manifest(_request.destination)
 	, _recentlySavedTimer([=] {
 		_recentlySaved.clear();
 		_current.recentlySaved.clear();
@@ -442,6 +611,7 @@ public:
 			return;
 		}
 		_started = true;
+		_manifest.load();
 		_current.state = State::Running;
 		_keepAlive = shared_from_this();
 
@@ -631,6 +801,14 @@ private:
 		return (id.peer == _request.scope.peerId)
 			? id.msg
 			: (id.msg - ServerMaxMsgId);
+	}
+
+	[[nodiscard]] QString manifestKey(FullMsgId id, Type type) const {
+		return u"%1:%2:%3:%4"_q
+			.arg(_session->uniqueId())
+			.arg(id.peer.value)
+			.arg(id.msg.bare)
+			.arg(type == Type::Photo ? u"photo"_q : u"video"_q);
 	}
 
 	[[nodiscard]] bool hasActivePhoto(not_null<PhotoData*> photo) const {
@@ -873,6 +1051,10 @@ private:
 				++_current.filteredOut;
 				return StartResult::Terminal;
 			}
+			if (_manifest.contains(manifestKey(id, Type::Photo))) {
+				++_current.alreadySaved;
+				return StartResult::Terminal;
+			}
 			const auto view = photo->createMediaView();
 			if (!view) {
 				recordFailure(
@@ -919,6 +1101,10 @@ private:
 			if ((_request.minimumSize > 0 && size < _request.minimumSize)
 				|| (_request.maximumSize > 0 && size > _request.maximumSize)) {
 				++_current.filteredOut;
+				return StartResult::Terminal;
+			}
+			if (_manifest.contains(manifestKey(id, Type::Video))) {
+				++_current.alreadySaved;
 				return StartResult::Terminal;
 			}
 			const auto directory = directoryFor(item, Type::Video, date);
@@ -1011,6 +1197,9 @@ private:
 			changed = true;
 			if (saved) {
 				setFileDates(i->path, i->date);
+				_manifest.record(
+					manifestKey(i->id, i->photo ? Type::Photo : Type::Video),
+					i->path);
 				_current.lastSavedPath = i->path;
 				++_current.saved;
 				recordRecentlySaved(i->name);
@@ -1127,6 +1316,7 @@ private:
 	const not_null<Main::Session*> _session;
 	base::weak_ptr<Window::SessionController> _controller;
 	const Request _request;
+	Manifest _manifest;
 	Progress _current;
 	std::deque<FullMsgId> _pending;
 	std::vector<Active> _active;
@@ -1188,10 +1378,11 @@ public:
 						.arg(StateText(job->state())),
 					st::boxLabel));
 				job->progressValue() | rpl::on_next([row, job](const Progress &value) {
-					row->setText(u"%1 — %2 (%3 saved, %4 failed)"_q
+					row->setText(u"%1 — %2 (%3 saved, %4 already saved, %5 failed)"_q
 						.arg(Title(job->request().types))
 						.arg(StateText(value.state))
 						.arg(value.saved)
+						.arg(value.alreadySaved)
 						.arg(value.failed));
 				}, box->lifetime());
 				box->addLeftButton(rpl::single(u"Show progress"_q),
@@ -1306,7 +1497,7 @@ private:
 	void persist() {
 		QByteArray data;
 		QDataStream stream(&data, QIODevice::WriteOnly);
-		stream << quint32(1) << quint32(_jobs.size());
+		stream << quint32(2) << quint32(_jobs.size());
 		for (const auto &job : _jobs) {
 			const auto &request = job->request();
 			stream << quint64(_session->uniqueId());
@@ -1348,6 +1539,7 @@ private:
 					<< quint8(failure.category)
 					<< failure.name << failure.reason;
 			}
+			stream << qint32(progress.alreadySaved);
 		}
 		if (stream.status() == QDataStream::Ok) {
 			_session->local().writePrefGeneric(kKey, data);
@@ -1363,7 +1555,7 @@ private:
 		quint32 version = 0;
 		quint32 count = 0;
 		stream >> version >> count;
-		if (version != 1 || count > 1000) {
+		if ((version != 1 && version != 2) || count > 1000) {
 			_attention.push_back(u"Invalid saved bulk-media job data"_q);
 			return;
 		}
@@ -1442,6 +1634,9 @@ private:
 				failure.category = FailureCategory(category);
 				job->_current.failures.push_back(std::move(failure));
 			}
+			if (version >= 2) {
+				stream >> job->_current.alreadySaved;
+			}
 			if (stream.status() != QDataStream::Ok) return;
 			attach(job);
 			_jobs.push_back(std::move(job));
@@ -1465,26 +1660,28 @@ private:
 }
 
 [[nodiscard]] inline QString CompletionText(const Progress &progress) {
-	if (!progress.saved && !progress.failed) {
+	if (!progress.saved && !progress.alreadySaved && !progress.failed) {
 		return progress.cancelled
 			? u"Saving stopped before any media was saved."_q
 			: u"No saveable media found."_q;
 	}
-	if (!progress.saved) {
+	if (!progress.saved && !progress.alreadySaved) {
 		return u"No media was saved. %1 skipped • %2 filtered • %3 failed."_q
 			.arg(progress.skipped)
 			.arg(progress.filteredOut)
 			.arg(progress.failed);
 	}
 	if (progress.cancelled) {
-		return u"Stopped after saving %1 items • %2 skipped • %3 filtered • %4 failed"_q
+		return u"Stopped after saving %1 items • %2 already saved • %3 skipped • %4 filtered • %5 failed"_q
 			.arg(progress.saved)
+			.arg(progress.alreadySaved)
 			.arg(progress.skipped)
 			.arg(progress.filteredOut)
 			.arg(progress.failed);
 	}
-	return u"Saved %1 items • %2 skipped • %3 filtered • %4 failed"_q
+	return u"Saved %1 items • %2 already saved • %3 skipped • %4 filtered • %5 failed"_q
 		.arg(progress.saved)
+		.arg(progress.alreadySaved)
 		.arg(progress.skipped)
 		.arg(progress.filteredOut)
 		.arg(progress.failed);
