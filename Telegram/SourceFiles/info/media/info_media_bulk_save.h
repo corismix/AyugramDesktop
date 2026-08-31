@@ -455,6 +455,7 @@ public:
 				}
 				return false;
 			},
+			.attach = RectPart::BottomLeft,
 			.infinite = true,
 		});
 	}
@@ -506,17 +507,33 @@ private:
 		});
 	}
 
-	[[nodiscard]] QString idSuffix(FullMsgId id) const {
-		return QString::number(id.peer.value)
-			+ u"_"_q
-			+ QString::number(id.msg.bare);
+	[[nodiscard]] QString messageIdSuffix(FullMsgId id) const {
+		return u"_m%1"_q.arg(id.msg.bare);
+	}
+
+	[[nodiscard]] QString filenameWithMessageIdSuffix(
+			QString filename,
+			FullMsgId id) const {
+		const auto extension = QFileInfo(filename).completeSuffix();
+		const auto extensionStart = extension.isEmpty()
+			? filename.size()
+			: filename.size() - extension.size() - 1;
+		const auto result = filename.left(extensionStart)
+			+ messageIdSuffix(id)
+			+ filename.mid(extensionStart);
+		return filedialogNextFilename(
+			QFileInfo(result).fileName(),
+			QString(),
+			QFileInfo(result).path());
 	}
 
 	[[nodiscard]] QString photoPath(FullMsgId id) const {
-		return filedialogDefaultName(
-			u"photo_"_q + idSuffix(id),
-			u".jpg"_q,
-			_scope.destination);
+		return filenameWithMessageIdSuffix(
+			filedialogDefaultName(
+				u"photo"_q,
+				u".jpg"_q,
+				_scope.destination),
+			id);
 	}
 
 	[[nodiscard]] QString documentPath(
@@ -524,18 +541,20 @@ private:
 			not_null<DocumentData*> document) const {
 		auto name = base::FileNameFromUserString(document->filename());
 		if (name.isEmpty()) {
-			name = u"video_"_q + idSuffix(id) + u".mp4"_q;
+			name = u"video.mp4"_q;
 		}
 		const auto info = QFileInfo(name);
 		auto prefix = info.completeBaseName();
 		if (prefix.isEmpty()) {
-			prefix = u"video_"_q + idSuffix(id);
+			prefix = u"video"_q;
 		}
 		const auto suffix = info.completeSuffix();
-		return filedialogDefaultName(
-			prefix,
-			suffix.isEmpty() ? u".mp4"_q : (u"."_q + suffix),
-			_scope.destination);
+		return filenameWithMessageIdSuffix(
+			filedialogDefaultName(
+				prefix,
+				suffix.isEmpty() ? u".mp4"_q : (u"."_q + suffix),
+				_scope.destination),
+			id);
 	}
 
 	void setFileDates(const QString &path, TimeId date) const {
@@ -577,10 +596,12 @@ private:
 				&& slice.skippedBefore().has_value()
 				&& slice.skippedAfter().has_value();
 		}) | rpl::take(1) | rpl::on_next([weak](SparseIdsMergedSlice slice) {
-			if (const auto job = weak.lock()) {
-				job->_pageLoading = false;
-				job->handlePage(std::move(slice));
-			}
+			crl::on_main([weak, slice = std::move(slice)]() mutable {
+				if (const auto job = weak.lock()) {
+					job->_pageLoading = false;
+					job->handlePage(std::move(slice));
+				}
+			});
 		}, _pageLifetime);
 	}
 
@@ -597,20 +618,34 @@ private:
 		if (slice.size() > 0) {
 			_nextAroundId = universalId(slice[0]);
 			for (auto i = slice.size(); i != 0; --i) {
-				const auto id = slice[i - 1];
-				const auto key = std::pair<uint64, int64>(
-					id.peer.value,
-					id.msg.bare);
-				if (_seen.emplace(key).second) {
-					_pending.push_back(id);
-					++_current.discovered;
-				}
+				enqueueItemOrItsGroup(slice[i - 1]);
 			}
 		} else {
 			_enumerationDone = true;
 		}
 		publish();
 		fillSlots();
+	}
+
+	void enqueueItemOrItsGroup(FullMsgId id) {
+		const auto item = _session->data().message(id);
+		if (item) {
+			for (const auto groupId : _session->data().itemOrItsGroup(item)) {
+				enqueue(groupId);
+			}
+		} else {
+			enqueue(id);
+		}
+	}
+
+	void enqueue(FullMsgId id) {
+		const auto key = std::pair<uint64, int64>(
+			id.peer.value,
+			id.msg.bare);
+		if (_seen.emplace(key).second) {
+			_pending.push_back(id);
+			++_current.discovered;
+		}
 	}
 
 	StartResult startItem(FullMsgId id) {
