@@ -81,6 +81,25 @@ ProfileTabsStrip {
 
 infoMediaHeaderFg: windowFg;
 
+infoBulkSaveTitleHeight: 22px;
+infoBulkSaveDetailsHeight: 20px;
+infoBulkSaveProgressSkip: 6px;
+infoBulkSaveProgressHeight: 4px;
+infoBulkSaveProgressFg: mediaPlayerActiveFg;
+infoBulkSaveProgressBg: mediaPlayerInactiveFg;
+infoBulkSaveDestinationSkip: 10px;
+infoBulkSaveDestinationHeight: 20px;
+infoBulkSaveActiveTitleSkip: 16px;
+infoBulkSaveActiveTitleHeight: 22px;
+infoBulkSaveActiveRowHeight: 30px;
+infoBulkSaveActiveRowSkip: 8px;
+infoBulkSaveActiveProgressTop: 20px;
+infoBulkSaveOverflowHeight: 20px;
+infoBulkSaveNameSkip: 12px;
+infoBulkSaveRecentTitleSkip: 14px;
+infoBulkSaveRecentTitleHeight: 22px;
+infoBulkSaveRecentRowHeight: 20px;
+
 infoMediaSearch: SearchFieldRow {
 	height: 44px;
 	padding: margins(8px, 6px, 8px, 6px);

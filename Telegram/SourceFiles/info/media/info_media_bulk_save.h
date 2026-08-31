@@ -8,6 +8,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #pragma once
 
 #include "base/base_file_utilities.h"
+#include "base/timer.h"
 #include "base/unixtime.h"
 #include "base/weak_ptr.h"
 #include "boxes/abstract_box.h"
@@ -25,18 +26,20 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "lang/lang_keys.h"
 #include "main/main_session.h"
 #include "ui/layers/generic_box.h"
+#include "ui/painter.h"
 #include "ui/text/format_values.h"
+#include "ui/widgets/buttons.h"
 #include "ui/widgets/labels.h"
 #include "ui/toast/toast.h"
 #include "window/window_controller.h"
 #include "window/window_session_controller.h"
 
+#include "styles/style_info.h"
 #include "styles/style_layers.h"
 
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
-#include <QStringList>
 
 #include <algorithm>
 #include <deque>
@@ -67,6 +70,11 @@ struct DownloadProgress {
 	bool waitingForExisting = false;
 };
 
+struct Failure {
+	QString name;
+	QString reason;
+};
+
 struct Progress {
 	int discovered = 0;
 	int saved = 0;
@@ -74,23 +82,290 @@ struct Progress {
 	int failed = 0;
 	std::optional<int> total;
 	std::vector<DownloadProgress> active;
+	std::vector<Failure> failures;
+	std::vector<QString> recentlySaved;
 	QString lastSavedPath;
+	bool stopping = false;
 	bool finished = false;
 	bool cancelled = false;
 };
 
+[[nodiscard]] inline QString DestinationText(const QString &path) {
+	return u"Saving to %1"_q.arg(QDir::toNativeSeparators(path));
+}
+
+[[nodiscard]] inline QString ProgressTitle(const Progress &progress) {
+	if (progress.finished) {
+		if (!progress.saved && progress.failed) {
+			return u"No media was saved"_q;
+		}
+		return progress.cancelled
+			? u"Stopped saving media"_q
+			: u"Finished saving media"_q;
+	}
+	if (progress.stopping) {
+		return u"Finishing active downloads…"_q;
+	}
+	if (progress.total) {
+		return u"Saving %1 of %2 items"_q
+			.arg(progress.saved)
+			.arg(*progress.total);
+	}
+	return progress.discovered
+		? u"Saving %1 items"_q.arg(progress.saved)
+		: u"Finding media…"_q;
+}
+
+[[nodiscard]] inline QString ProgressDetails(const Progress &progress) {
+	auto details = QString();
+	if (!progress.finished && !progress.active.empty()) {
+		details = u"%1 downloading"_q.arg(progress.active.size());
+	} else if (!progress.finished && !progress.stopping) {
+		details = u"%1 discovered"_q.arg(progress.discovered);
+	}
+	if (progress.skipped || progress.failed) {
+		if (!details.isEmpty()) {
+			details += u" • "_q;
+		}
+		details += u"%1 skipped • %2 failed"_q
+			.arg(progress.skipped)
+			.arg(progress.failed);
+	}
+	return details;
+}
+
+class ProgressWidget final : public Ui::RpWidget {
+public:
+	explicit ProgressWidget(QWidget *parent, QString destination)
+	: RpWidget(parent)
+	, _destination(std::move(destination)) {
+	}
+
+	void setProgress(Progress progress) {
+		_progress = std::move(progress);
+		resizeToWidth(width());
+		update();
+	}
+
+protected:
+	int resizeGetHeight(int newWidth) override {
+		if (newWidth <= 0) {
+			return 0;
+		}
+		const auto rows = std::min(int(_progress.active.size()), kVisibleRows);
+		const auto overflow = int(_progress.active.size()) > kVisibleRows;
+		const auto recent = std::min(
+			int(_progress.recentlySaved.size()),
+			kVisibleRecent);
+		return st::infoBulkSaveTitleHeight
+			+ st::infoBulkSaveDetailsHeight
+			+ st::infoBulkSaveProgressSkip
+			+ st::infoBulkSaveProgressHeight
+			+ st::infoBulkSaveDestinationSkip
+			+ st::infoBulkSaveDestinationHeight
+			+ (rows ? (st::infoBulkSaveActiveTitleSkip
+				+ st::infoBulkSaveActiveTitleHeight
+				+ rows * st::infoBulkSaveActiveRowHeight
+				+ (rows - 1) * st::infoBulkSaveActiveRowSkip) : 0)
+			+ (overflow ? st::infoBulkSaveOverflowHeight : 0)
+			+ (recent ? (st::infoBulkSaveRecentTitleSkip
+				+ st::infoBulkSaveRecentTitleHeight
+				+ recent * st::infoBulkSaveRecentRowHeight) : 0);
+	}
+
+	void paintEvent(QPaintEvent *e) override {
+		auto p = Painter(this);
+		auto top = 0;
+		p.setFont(st::semiboldFont);
+		p.setPen(st::windowBoldFg);
+		p.drawTextLeft(0, top, width(), ProgressTitle(_progress));
+		top += st::infoBulkSaveTitleHeight;
+
+		p.setFont(st::normalFont);
+		p.setPen(st::windowSubTextFg);
+		p.drawTextLeft(0, top, width(), ProgressDetails(_progress));
+		top += st::infoBulkSaveDetailsHeight + st::infoBulkSaveProgressSkip;
+
+		paintProgress(p, top, aggregateProgress());
+		top += st::infoBulkSaveProgressHeight
+			+ st::infoBulkSaveDestinationSkip;
+
+		p.drawTextLeft(
+			0,
+			top,
+			width(),
+			st::normalFont->elided(DestinationText(_destination), width()));
+		top += st::infoBulkSaveDestinationHeight;
+
+		const auto count = std::min(int(_progress.active.size()), kVisibleRows);
+		if (count) {
+			top += st::infoBulkSaveActiveTitleSkip;
+			p.setFont(st::semiboldFont);
+			p.setPen(st::windowBoldFg);
+			p.drawTextLeft(0, top, width(), u"Downloading"_q);
+			top += st::infoBulkSaveActiveTitleHeight;
+
+			for (auto i = 0; i != count; ++i) {
+				paintActive(p, top, _progress.active[i]);
+				top += st::infoBulkSaveActiveRowHeight;
+				if (i + 1 != count) {
+					top += st::infoBulkSaveActiveRowSkip;
+				}
+			}
+			const auto overflow = int(_progress.active.size()) - count;
+			if (overflow > 0) {
+				p.setFont(st::normalFont);
+				p.setPen(st::windowSubTextFg);
+				p.drawTextLeft(
+					0,
+					top,
+					width(),
+					u"+ %1 more downloading"_q.arg(overflow));
+				top += st::infoBulkSaveOverflowHeight;
+			}
+		}
+		paintRecentlySaved(p, top);
+	}
+
+private:
+	static constexpr auto kVisibleRows = 4;
+	static constexpr auto kVisibleRecent = 2;
+
+	[[nodiscard]] std::optional<float64> aggregateProgress() const {
+		if (!_progress.total || !*_progress.total) {
+			return std::nullopt;
+		}
+		return std::clamp(
+			float64(
+				_progress.saved + _progress.skipped + _progress.failed)
+				/ *_progress.total,
+			0.,
+			1.);
+	}
+
+	[[nodiscard]] std::optional<float64> itemProgress(
+			const DownloadProgress &progress) const {
+		if (progress.total > 0) {
+			return std::clamp(
+				float64(progress.ready) / progress.total,
+				0.,
+				1.);
+		}
+		if (progress.progress > 0.) {
+			return std::clamp(progress.progress, 0., 1.);
+		}
+		return std::nullopt;
+	}
+
+	void paintProgress(
+			Painter &p,
+			int top,
+			std::optional<float64> progress) const {
+		p.fillRect(
+			0,
+			top,
+			width(),
+			st::infoBulkSaveProgressHeight,
+			st::infoBulkSaveProgressBg);
+		const auto filled = progress
+			? qRound(*progress * width())
+			: width() / 3;
+		if (filled > 0) {
+			p.fillRect(
+				0,
+				top,
+				filled,
+				st::infoBulkSaveProgressHeight,
+				st::infoBulkSaveProgressFg);
+		}
+	}
+
+	void paintActive(
+			Painter &p,
+			int top,
+			const DownloadProgress &progress) const {
+		auto status = QString();
+		if (progress.waitingForExisting) {
+			status = u"Finishing existing download…"_q;
+		} else if (progress.total > 0 && progress.ready > 0) {
+			status = Ui::FormatProgressText(progress.ready, progress.total);
+		} else if (progress.progress > 0.) {
+			status = u"%1%"_q.arg(int(progress.progress * 100.));
+		} else {
+			status = u"Downloading…"_q;
+		}
+		p.setFont(st::normalFont);
+		p.setPen(st::windowBoldFg);
+		const auto statusWidth = st::normalFont->width(status);
+		p.drawTextLeft(
+			0,
+			top,
+			width() - statusWidth - st::infoBulkSaveNameSkip,
+			st::normalFont->elided(
+				progress.name,
+				width() - statusWidth - st::infoBulkSaveNameSkip));
+		p.setPen(st::windowSubTextFg);
+		p.drawTextRight(0, top, width(), status);
+		paintProgress(
+			p,
+			top + st::infoBulkSaveActiveProgressTop,
+			itemProgress(progress));
+	}
+
+	void paintRecentlySaved(Painter &p, int top) const {
+		const auto count = std::min(
+			int(_progress.recentlySaved.size()),
+			kVisibleRecent);
+		if (!count) {
+			return;
+		}
+		top += st::infoBulkSaveRecentTitleSkip;
+		p.setFont(st::semiboldFont);
+		p.setPen(st::windowBoldFg);
+		p.drawTextLeft(0, top, width(), u"Just saved"_q);
+		top += st::infoBulkSaveRecentTitleHeight;
+		p.setFont(st::normalFont);
+		p.setPen(st::windowSubTextFg);
+		for (auto i = 0; i != count; ++i) {
+			p.drawTextLeft(
+				0,
+				top,
+				width(),
+				st::normalFont->elided(_progress.recentlySaved[i], width()));
+			top += st::infoBulkSaveRecentRowHeight;
+		}
+	}
+
+	Progress _progress;
+	QString _destination;
+
+};
+
 class Job final : public std::enable_shared_from_this<Job> {
 public:
-	Job(not_null<Main::Session*> session, Scope scope)
+	Job(
+		not_null<Main::Session*> session,
+		not_null<Window::SessionController*> controller,
+		Scope scope)
 	: _session(session)
-	, _scope(std::move(scope)) {
+	, _controller(base::make_weak(controller))
+	, _scope(std::move(scope))
+	, _recentlySavedTimer([=] {
+		_recentlySaved.clear();
+		_current.recentlySaved.clear();
+		publish();
+	})
+	, _stopCheckTimer([=] {
+		checkActive(false);
+	}) {
 	}
 
 	void start() {
-		if (_started || _cancelled) {
+		if (_started || _current.finished) {
 			return;
 		}
 		_started = true;
+		_keepAlive = shared_from_this();
 
 		const auto weak = weak_from_this();
 		_session->data().photoLoadProgress(
@@ -121,23 +396,74 @@ public:
 	}
 
 	void cancel() {
-		if (_cancelled || _current.finished) {
+		if (_current.stopping || _current.finished) {
 			return;
 		}
-		_cancelled = true;
+		_current.stopping = true;
 		_pageLifetime.destroy();
+		_pageLoading = false;
 		_pending.clear();
-		_current.cancelled = true;
 		publish();
-		_lifetime.destroy();
+		checkActive(false);
+		if (!_current.finished && !_active.empty()) {
+			_stopCheckTimer.callEach(kStopCheckInterval);
+		}
+		finishIfDone();
 	}
 
 	[[nodiscard]] bool finished() const {
-		return _current.finished || _cancelled;
+		return _current.finished;
 	}
 
 	[[nodiscard]] rpl::producer<Progress> progressValue() const {
 		return rpl::single(_current) | rpl::then(_updates.events());
+	}
+
+	[[nodiscard]] Progress currentProgress() const {
+		return _current;
+	}
+
+	void setShowDetailsCallback(Fn<void()> callback) {
+		_showDetails = std::move(callback);
+	}
+
+	void setFinishedCallback(Fn<void(Progress)> callback) {
+		_finishedCallback = std::move(callback);
+	}
+
+	void showBackgroundStatus() {
+		if (_current.finished || _backgroundToast.get()) {
+			return;
+		}
+		const auto controller = _controller.get();
+		if (!controller) {
+			return;
+		}
+		auto text = tr::marked(u"Saving media in the background. "_q);
+		text.append(tr::link(
+			u"Show progress"_q,
+			u"internal:show_bulk_media_progress"_q));
+		const auto weak = weak_from_this();
+		_backgroundToast = controller->showToast(Ui::Toast::Config{
+			.text = std::move(text),
+			.filter = [weak](const ClickHandlerPtr &, Qt::MouseButton) {
+				if (const auto job = weak.lock()) {
+					job->hideBackgroundStatus();
+					if (job->_showDetails) {
+						job->_showDetails();
+					}
+				}
+				return false;
+			},
+			.infinite = true,
+		});
+	}
+
+	void hideBackgroundStatus() {
+		if (const auto toast = _backgroundToast.get()) {
+			toast->hideAnimated();
+		}
+		_backgroundToast = nullptr;
 	}
 
 private:
@@ -226,7 +552,7 @@ private:
 	}
 
 	void loadPage(MsgId aroundId) {
-		if (_cancelled || _enumerationDone || _pageLoading) {
+		if (_current.stopping || _enumerationDone || _pageLoading) {
 			return;
 		}
 		_pageLoading = true;
@@ -259,7 +585,7 @@ private:
 	}
 
 	void handlePage(SparseIdsMergedSlice slice) {
-		if (_cancelled) {
+		if (_current.stopping) {
 			return;
 		}
 		if (const auto count = slice.fullCount()) {
@@ -313,7 +639,9 @@ private:
 			}
 			const auto view = photo->createMediaView();
 			if (!view) {
-				++_current.failed;
+				recordFailure(
+					QFileInfo(photoPath(id)).fileName(),
+					u"Could not prepare the photo for download."_q);
 				return StartResult::Terminal;
 			}
 			const auto path = photoPath(id);
@@ -359,7 +687,7 @@ private:
 	}
 
 	void fillSlots() {
-		if (_cancelled || _filling) {
+		if (_current.stopping || _filling) {
 			return;
 		}
 		_filling = true;
@@ -376,7 +704,7 @@ private:
 		_filling = false;
 
 		checkActive(false);
-		if (!_cancelled
+		if (!_current.stopping
 			&& _pending.empty()
 			&& _active.size() < kMaxActive
 			&& !_enumerationDone
@@ -388,7 +716,7 @@ private:
 	}
 
 	void checkActive(bool refill = true) {
-		if (_cancelled || _checking) {
+		if (_checking) {
 			return;
 		}
 		_checking = true;
@@ -422,15 +750,18 @@ private:
 				setFileDates(i->path, i->date);
 				_current.lastSavedPath = i->path;
 				++_current.saved;
+				recordRecentlySaved(i->name);
 			} else {
-				++_current.failed;
+				recordFailure(
+					i->name,
+					u"Could not save the downloaded file."_q);
 			}
 			i = _active.erase(i);
 		}
 		_checking = false;
 		publish();
 
-		if (refill && changed && !_filling) {
+		if (refill && changed && !_filling && !_current.stopping) {
 			fillSlots();
 		} else {
 			finishIfDone();
@@ -438,16 +769,49 @@ private:
 	}
 
 	void finishIfDone() {
-		if (_cancelled
-			|| _current.finished
-			|| !_enumerationDone
-			|| _pageLoading
-			|| !_pending.empty()
-			|| !_active.empty()) {
+		if (_current.finished || _pageLoading || !_active.empty()) {
 			return;
 		}
+		if (_current.stopping) {
+			_current.cancelled = true;
+			finish();
+			return;
+		}
+		if (!_enumerationDone || !_pending.empty()) {
+			return;
+		}
+		finish();
+	}
+
+	void finish() {
 		_current.finished = true;
 		publish();
+		if (_backgroundToast.get() && _finishedCallback) {
+			_finishedCallback(_current);
+		}
+		hideBackgroundStatus();
+		_lifetime.destroy();
+		_stopCheckTimer.cancel();
+		const auto weak = weak_from_this();
+		crl::on_main([weak] {
+			if (const auto job = weak.lock()) {
+				job->_keepAlive = nullptr;
+			}
+		});
+	}
+
+	void recordFailure(QString name, QString reason) {
+		++_current.failed;
+		_current.failures.push_back({ std::move(name), std::move(reason) });
+	}
+
+	void recordRecentlySaved(QString name) {
+		_recentlySaved.push_back(std::move(name));
+		if (_recentlySaved.size() > kMaxRecent) {
+			_recentlySaved.erase(begin(_recentlySaved));
+		}
+		_current.recentlySaved = _recentlySaved;
+		_recentlySavedTimer.callOnce(kRecentVisibleDuration);
 	}
 
 	void publish() {
@@ -473,6 +837,7 @@ private:
 	}
 
 	const not_null<Main::Session*> _session;
+	const base::weak_ptr<Window::SessionController> _controller;
 	const Scope _scope;
 	Progress _current;
 	std::deque<FullMsgId> _pending;
@@ -480,14 +845,23 @@ private:
 	std::set<std::pair<uint64, int64>> _seen;
 	MsgId _nextAroundId = ServerMaxMsgId - 1;
 	bool _started = false;
-	bool _cancelled = false;
 	bool _enumerationDone = false;
 	bool _pageLoading = false;
 	bool _filling = false;
 	bool _checking = false;
+	static constexpr auto kMaxRecent = 2;
+	static constexpr auto kRecentVisibleDuration = crl::time(3000);
+	static constexpr auto kStopCheckInterval = crl::time(500);
 	rpl::event_stream<Progress> _updates;
 	rpl::lifetime _pageLifetime;
 	rpl::lifetime _lifetime;
+	base::Timer _recentlySavedTimer;
+	base::Timer _stopCheckTimer;
+	std::vector<QString> _recentlySaved;
+	std::shared_ptr<Job> _keepAlive;
+	base::weak_ptr<Ui::Toast::Instance> _backgroundToast;
+	Fn<void()> _showDetails;
+	Fn<void(Progress)> _finishedCallback;
 
 };
 
@@ -500,54 +874,21 @@ private:
 	}
 }
 
-[[nodiscard]] inline QString Summary(Progress progress) {
-	const auto count = progress.total;
-	auto result = count
-		? u"%1 / %2 saved"_q.arg(progress.saved).arg(*count)
-		: u"%1 saved • %2 discovered"_q
-			.arg(progress.saved)
-			.arg(progress.discovered);
-	if (progress.skipped || progress.failed) {
-		result += u"\n%1 skipped • %2 failed"_q
-			.arg(progress.skipped)
-			.arg(progress.failed);
-	}
-	return result;
-}
-
-[[nodiscard]] inline QString ActiveText(Progress progress) {
-	if (progress.active.empty()) {
-		return progress.finished
-			? QString()
-			: u"Preparing downloads…"_q;
-	}
-	constexpr auto kVisible = 4;
-	auto lines = QStringList();
-	const auto count = std::min(int(progress.active.size()), kVisible);
-	for (auto i = 0; i != count; ++i) {
-		const auto &active = progress.active[i];
-		auto status = QString();
-		if (active.waitingForExisting) {
-			status = u"finishing existing download…"_q;
-		} else if (active.total > 0 && active.ready > 0) {
-			status = Ui::FormatProgressText(active.ready, active.total);
-		} else if (active.progress > 0.) {
-			status = u"%1%"_q.arg(int(active.progress * 100.));
-		} else {
-			status = u"downloading…"_q;
-		}
-		lines.push_back(active.name + u" — "_q + status);
-	}
-	if (int(progress.active.size()) > kVisible) {
-		lines.push_back(u"+ %1 more downloading"_q.arg(
-			int(progress.active.size()) - kVisible));
-	}
-	return lines.join(u'\n');
-}
-
 [[nodiscard]] inline QString CompletionText(const Progress &progress) {
 	if (!progress.saved && !progress.failed) {
-		return u"No saveable media found."_q;
+		return progress.cancelled
+			? u"Saving stopped before any media was saved."_q
+			: u"No saveable media found."_q;
+	}
+	if (!progress.saved) {
+		return u"No media was saved. %1 downloads failed."_q
+			.arg(progress.failed);
+	}
+	if (progress.cancelled) {
+		return u"Stopped after saving %1 items • %2 skipped • %3 failed"_q
+			.arg(progress.saved)
+			.arg(progress.skipped)
+			.arg(progress.failed);
 	}
 	return u"Saved %1 items • %2 skipped • %3 failed"_q
 		.arg(progress.saved)
@@ -587,58 +928,98 @@ inline void Start(
 			const auto destination = scope.destination;
 			const auto job = std::make_shared<Job>(
 				&controller->session(),
+				controller,
 				std::move(scope));
-			controller->show(Box([=](not_null<Ui::GenericBox*> box) {
-				box->setTitle(rpl::single(title));
-				box->addRow(object_ptr<Ui::FlatLabel>(
-					box,
-					job->progressValue() | rpl::map([](Progress progress) {
-						return Summary(std::move(progress));
-					}),
-					st::boxLabel));
-				box->addRow(object_ptr<Ui::FlatLabel>(
-					box,
-					job->progressValue() | rpl::map([](Progress progress) {
-						return ActiveText(std::move(progress));
-					}),
-					st::boxLabel));
-				job->progressValue(
-				) | rpl::filter([](const Progress &progress) {
-					return progress.finished;
-				}) | rpl::take(1) | rpl::on_next([=](const Progress &progress) {
-					if (const auto controller = weak.get()) {
-						const auto reveal = progress.lastSavedPath.isEmpty()
-							? destination
-							: progress.lastSavedPath;
-						auto text = TextWithEntities{ CompletionText(progress) };
-						if (progress.saved > 0) {
-							text.append(u'\n').append(tr::link(
-								u"Show in Folder"_q,
-								u"internal:show_bulk_media_saved"_q));
-						}
-						controller->showToast(Ui::Toast::Config{
-							.text = std::move(text),
-							.filter = [reveal](
-									const ClickHandlerPtr &,
-									Qt::MouseButton) {
-								File::ShowInFolder(reveal);
-								return false;
-							},
+			const auto weakJob = std::weak_ptr<Job>(job);
+			const auto showDetails = [weak, weakJob, title, destination] {
+				const auto controller = weak.get();
+				const auto job = weakJob.lock();
+				if (!controller || !job) {
+					return;
+				}
+				job->hideBackgroundStatus();
+				controller->show(Box([=](not_null<Ui::GenericBox*> box) {
+					box->setTitle(rpl::single(title));
+					const auto progress = box->addRow(object_ptr<ProgressWidget>(
+						box,
+						destination));
+					box->addLeftButton(
+						rpl::single(u"Show in Folder"_q),
+						[destination] { File::ShowInFolder(destination); });
+					const auto reviewFailures = box->addLeftButton(
+						rpl::single(u"Review failures"_q),
+						[weak, weakJob] {
+							const auto controller = weak.get();
+							const auto job = weakJob.lock();
+							if (!controller || !job) {
+								return;
+							}
+							const auto failures = job->currentProgress().failures;
+							controller->show(Box([failures](
+									not_null<Ui::GenericBox*> box) {
+								box->setTitle(rpl::single(u"Failed media"_q));
+								for (const auto &failure : failures) {
+									box->addRow(object_ptr<Ui::FlatLabel>(
+										box,
+										failure.name + u" — "_q + failure.reason,
+										st::boxLabel));
+								}
+								box->addButton(tr::lng_close(), [=] { box->closeBox(); });
+							}));
 						});
+					reviewFailures->hide();
+					const auto stop = box->addButton(
+						rpl::single(u"Stop after active downloads"_q),
+						[job] { job->cancel(); });
+					job->progressValue(
+					) | rpl::on_next([=](const Progress &value) {
+						progress->setProgress(value);
+						reviewFailures->setVisible(!value.failures.empty());
+						if (value.stopping && !value.finished) {
+							stop->setText(rpl::single(
+								u"Finishing active downloads…"_q));
+							stop->setDisabled(true);
+						}
+					}, progress->lifetime());
+					job->progressValue(
+					) | rpl::filter([](const Progress &value) {
+						return value.finished;
+					}) | rpl::take(1) | rpl::on_next([=](const Progress &) {
+						stop->setText(tr::lng_close());
+						stop->setDisabled(false);
+						stop->setClickedCallback([=] { box->closeBox(); });
+					}, box->lifetime());
+					box->boxClosing(
+					) | rpl::on_next(
+						[job] { job->showBackgroundStatus(); },
+						box->lifetime());
+				}));
+			};
+			job->setShowDetailsCallback(showDetails);
+			job->setFinishedCallback([weak, destination](Progress progress) {
+				if (const auto controller = weak.get()) {
+					const auto reveal = progress.lastSavedPath.isEmpty()
+						? destination
+						: progress.lastSavedPath;
+					auto text = tr::marked(CompletionText(progress));
+					if (progress.saved > 0) {
+						text.append(u'\n').append(tr::link(
+							u"Show in Folder"_q,
+							u"internal:show_bulk_media_saved"_q));
 					}
-					box->closeBox();
-				}, box->lifetime());
-				box->addButton(tr::lng_cancel(), [=] {
-					job->cancel();
-					box->closeBox();
-				});
-				box->lifetime().add([job] {
-					if (!job->finished()) {
-						job->cancel();
-					}
-				});
-			}));
+					controller->showToast(Ui::Toast::Config{
+						.text = std::move(text),
+						.filter = [reveal](
+								const ClickHandlerPtr &,
+								Qt::MouseButton) {
+							File::ShowInFolder(reveal);
+							return false;
+						},
+					});
+				}
+			});
 			job->start();
+			showDetails();
 		});
 }
 
