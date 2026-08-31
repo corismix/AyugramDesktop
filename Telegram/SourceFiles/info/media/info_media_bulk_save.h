@@ -534,7 +534,7 @@ private:
 		const auto suffix = info.completeSuffix();
 		return filedialogDefaultName(
 			prefix,
-			suffix.isEmpty() ? QString() : (u"."_q + suffix),
+			suffix.isEmpty() ? u".mp4"_q : (u"."_q + suffix),
 			_scope.destination);
 	}
 
