@@ -69,6 +69,10 @@ class SessionController;
 struct TermsLock;
 } // namespace Window
 
+namespace Info::Media::BulkSave {
+class Manager;
+} // namespace Info::Media::BulkSave
+
 namespace Stickers {
 class EmojiPack;
 class DicePacks;
@@ -212,6 +216,9 @@ public:
 	[[nodiscard]] SessionSettings &settings() const {
 		return *_settings;
 	}
+	[[nodiscard]] Info::Media::BulkSave::Manager &bulkSave() const {
+		return *_bulkSave;
+	}
 	[[nodiscard]] SendAsPeers &sendAsPeers() const {
 		return *_sendAsPeers;
 	}
@@ -316,6 +323,7 @@ private:
 	// _data depends on _downloader / _uploader.
 	const std::unique_ptr<Data::Session> _data;
 	const not_null<UserData*> _user;
+	const std::unique_ptr<Info::Media::BulkSave::Manager> _bulkSave;
 
 	// _emojiStickersPack depends on _data.
 	const std::unique_ptr<Stickers::EmojiPack> _emojiStickersPack;

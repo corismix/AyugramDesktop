@@ -21,6 +21,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_session.h"
 #include "data/data_shared_media.h"
 #include "data/data_file_origin.h"
+#include "data/data_forum_topic.h"
 #include "history/history_item.h"
 #include "history/view/history_view_context_menu.h"
 #include "lang/lang_keys.h"
@@ -29,10 +30,13 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/painter.h"
 #include "ui/text/format_values.h"
 #include "ui/widgets/buttons.h"
+#include "ui/widgets/checkbox.h"
+#include "ui/widgets/fields/input_field.h"
 #include "ui/widgets/labels.h"
 #include "ui/toast/toast.h"
 #include "window/window_controller.h"
 #include "window/window_session_controller.h"
+#include "storage/storage_account.h"
 
 #include "styles/style_info.h"
 #include "styles/style_layers.h"
@@ -40,6 +44,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QDate>
+#include <QDataStream>
 
 #include <algorithm>
 #include <deque>
@@ -52,13 +58,58 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 namespace Info::Media::BulkSave {
 
 using Type = Storage::SharedMediaType;
+class Manager;
+
+enum class State : uchar {
+	Running,
+	Pausing,
+	Paused,
+	Cancelling,
+	Finished,
+};
+
+enum class FailureCategory : uchar {
+	Unknown,
+	MissingMessage,
+	Restricted,
+	Unsupported,
+	Prepare,
+	Destination,
+	Save,
+};
 
 struct Scope {
 	PeerId peerId = 0;
 	MsgId topicRootId = 0;
 	PeerId monoforumPeerId = 0;
 	PeerId migratedPeerId = 0;
-	Type type = Type::PhotoVideo;
+};
+
+enum class Layout : uchar {
+	Flat,
+	Type,
+	YearMonth,
+	Topic,
+};
+
+[[nodiscard]] inline Storage::SharedMediaTypesMask TypesFor(Type type) {
+	if (type == Type::PhotoVideo) {
+		return Storage::SharedMediaTypesMask{}
+			.added(Type::Photo)
+			.added(Type::Video);
+	}
+	return Storage::SharedMediaTypesMask{}.added(type);
+}
+
+struct Request {
+	Scope scope;
+	Storage::SharedMediaTypesMask types;
+	QDate fromDate;
+	QDate toDate;
+	PeerId senderId = 0;
+	int64 minimumSize = 0;
+	int64 maximumSize = 0;
+	Layout layout = Layout::Flat;
 	QString destination;
 };
 
@@ -71,6 +122,9 @@ struct DownloadProgress {
 };
 
 struct Failure {
+	FullMsgId id;
+	Type type = Type::Photo;
+	FailureCategory category = FailureCategory::Unknown;
 	QString name;
 	QString reason;
 };
@@ -79,6 +133,7 @@ struct Progress {
 	int discovered = 0;
 	int saved = 0;
 	int skipped = 0;
+	int filteredOut = 0;
 	int failed = 0;
 	std::optional<int> total;
 	std::vector<DownloadProgress> active;
@@ -88,7 +143,22 @@ struct Progress {
 	bool stopping = false;
 	bool finished = false;
 	bool cancelled = false;
+	State state = State::Running;
 };
+
+[[nodiscard]] inline QString Title(
+	const Storage::SharedMediaTypesMask &types);
+
+[[nodiscard]] inline QString StateText(State state) {
+	switch (state) {
+	case State::Running: return u"Running"_q;
+	case State::Pausing: return u"Pausing"_q;
+	case State::Paused: return u"Paused"_q;
+	case State::Cancelling: return u"Cancelling"_q;
+	case State::Finished: return u"Finished"_q;
+	}
+	return u"Unknown"_q;
+}
 
 [[nodiscard]] inline QString DestinationText(const QString &path) {
 	return u"Saving to %1"_q.arg(QDir::toNativeSeparators(path));
@@ -105,6 +175,12 @@ struct Progress {
 	}
 	if (progress.stopping) {
 		return u"Finishing active downloads…"_q;
+	}
+	if (progress.state == State::Paused) {
+		return u"Bulk media save paused"_q;
+	}
+	if (progress.state == State::Pausing) {
+		return u"Pausing bulk media save…"_q;
 	}
 	if (progress.total) {
 		return u"Saving %1 of %2 items"_q
@@ -123,12 +199,13 @@ struct Progress {
 	} else if (!progress.finished && !progress.stopping) {
 		details = u"%1 discovered"_q.arg(progress.discovered);
 	}
-	if (progress.skipped || progress.failed) {
+	if (progress.skipped || progress.filteredOut || progress.failed) {
 		if (!details.isEmpty()) {
 			details += u" • "_q;
 		}
-		details += u"%1 skipped • %2 failed"_q
+		details += u"%1 skipped • %2 filtered • %3 failed"_q
 			.arg(progress.skipped)
+			.arg(progress.filteredOut)
 			.arg(progress.failed);
 	}
 	return details;
@@ -345,11 +422,11 @@ class Job final : public std::enable_shared_from_this<Job> {
 public:
 	Job(
 		not_null<Main::Session*> session,
-		not_null<Window::SessionController*> controller,
-		Scope scope)
+		Window::SessionController *controller,
+		Request request)
 	: _session(session)
-	, _controller(base::make_weak(controller))
-	, _scope(std::move(scope))
+	, _controller(controller ? base::make_weak(controller) : nullptr)
+	, _request(std::move(request))
 	, _recentlySavedTimer([=] {
 		_recentlySaved.clear();
 		_current.recentlySaved.clear();
@@ -361,10 +438,11 @@ public:
 	}
 
 	void start() {
-		if (_started || _current.finished) {
+		if (_started || _current.finished || _current.state == State::Cancelling) {
 			return;
 		}
 		_started = true;
+		_current.state = State::Running;
 		_keepAlive = shared_from_this();
 
 		const auto weak = weak_from_this();
@@ -391,7 +469,42 @@ public:
 			}
 		}, _lifetime);
 
-		loadPage(ServerMaxMsgId - 1);
+		if (!_pending.empty()) {
+			fillSlots();
+		} else if (!_enumerationDone) {
+			loadPage(_nextAroundId);
+		}
+		publish();
+	}
+
+	void pause() {
+		if (_current.finished
+			|| _current.state == State::Pausing
+			|| _current.state == State::Paused
+			|| _current.state == State::Cancelling) {
+			return;
+		}
+		_current.state = State::Pausing;
+		_pageLifetime.destroy();
+		_pageLoading = false;
+		if (_active.empty()) {
+			_current.state = State::Paused;
+		}
+		publish();
+	}
+
+	void resume() {
+		if (_current.finished
+			|| (_current.state != State::Paused
+				&& _current.state != State::Pausing)) {
+			return;
+		}
+		_current.state = State::Running;
+		if (!_started) {
+			start();
+		} else {
+			fillSlots();
+		}
 		publish();
 	}
 
@@ -399,6 +512,7 @@ public:
 		if (_current.stopping || _current.finished) {
 			return;
 		}
+		_current.state = State::Cancelling;
 		_current.stopping = true;
 		_pageLifetime.destroy();
 		_pageLoading = false;
@@ -423,12 +537,36 @@ public:
 		return _current;
 	}
 
+	[[nodiscard]] const Request &request() const {
+		return _request;
+	}
+
+	[[nodiscard]] State state() const {
+		return _current.state;
+	}
+
+	[[nodiscard]] bool canRetry() const {
+		return _current.finished && !_current.failures.empty();
+	}
+
+	void attachController(not_null<Window::SessionController*> controller) {
+		_controller = base::make_weak(controller);
+	}
+
+	[[nodiscard]] std::vector<Failure> failures() const {
+		return _current.failures;
+	}
+
 	void setShowDetailsCallback(Fn<void()> callback) {
 		_showDetails = std::move(callback);
 	}
 
 	void setFinishedCallback(Fn<void(Progress)> callback) {
 		_finishedCallback = std::move(callback);
+	}
+
+	void setChangedCallback(Fn<void()> callback) {
+		_changedCallback = std::move(callback);
 	}
 
 	void showBackgroundStatus() {
@@ -468,6 +606,7 @@ public:
 	}
 
 private:
+	friend class Manager;
 	static constexpr auto kPageSize = 64;
 	static constexpr auto kMaxActive = 12;
 
@@ -489,7 +628,7 @@ private:
 	};
 
 	[[nodiscard]] MsgId universalId(FullMsgId id) const {
-		return (id.peer == _scope.peerId)
+		return (id.peer == _request.scope.peerId)
 			? id.msg
 			: (id.msg - ServerMaxMsgId);
 	}
@@ -513,7 +652,8 @@ private:
 
 	[[nodiscard]] QString filenameWithMessageIdSuffix(
 			QString filename,
-			FullMsgId id) const {
+			FullMsgId id,
+			const QString &directory) const {
 		const auto extension = QFileInfo(filename).completeSuffix();
 		const auto extensionStart = extension.isEmpty()
 			? filename.size()
@@ -524,21 +664,62 @@ private:
 		return filedialogNextFilename(
 			QFileInfo(result).fileName(),
 			QString(),
-			QFileInfo(result).path());
+			directory);
 	}
 
-	[[nodiscard]] QString photoPath(FullMsgId id) const {
+	[[nodiscard]] QString directoryFor(
+			not_null<HistoryItem*> item,
+			Type type,
+			TimeId date) const {
+		auto directory = _request.destination;
+		if (_request.layout == Layout::Type) {
+			directory += (type == Type::Photo)
+				? u"Photos/"_q
+				: u"Videos/"_q;
+		} else if (_request.layout == Layout::YearMonth) {
+			directory += base::unixtime::parse(date).toString(u"yyyy-MM/"_q);
+		} else if (_request.layout == Layout::Topic) {
+			auto name = QString();
+			if (const auto rootId = item->topicRootId()) {
+				if (const auto topic = _session->data().peer(
+					_request.scope.peerId)->forumTopicFor(rootId)) {
+					name = topic->title();
+				}
+			}
+			name = base::FileNameFromUserString(name);
+			if (name.isEmpty()) {
+				name = u"Topic-%1"_q.arg(item->topicRootId().bare);
+			}
+			directory += name + '/';
+		}
+		const auto root = QDir::cleanPath(_request.destination);
+		const auto child = QDir::cleanPath(directory);
+		if (child != root
+			&& !child.startsWith(root + '/')) {
+			return QString();
+		}
+		if (!QDir().mkpath(directory)) {
+			return QString();
+		}
+		return directory;
+	}
+
+	[[nodiscard]] QString photoPath(
+			FullMsgId id,
+			const QString &directory) const {
 		return filenameWithMessageIdSuffix(
 			filedialogDefaultName(
 				u"photo"_q,
 				u".jpg"_q,
-				_scope.destination),
-			id);
+				directory),
+			id,
+			directory);
 	}
 
 	[[nodiscard]] QString documentPath(
 			FullMsgId id,
-			not_null<DocumentData*> document) const {
+			not_null<DocumentData*> document,
+			const QString &directory) const {
 		auto name = base::FileNameFromUserString(document->filename());
 		if (name.isEmpty()) {
 			name = u"video.mp4"_q;
@@ -553,8 +734,9 @@ private:
 			filedialogDefaultName(
 				prefix,
 				suffix.isEmpty() ? u".mp4"_q : (u"."_q + suffix),
-				_scope.destination),
-			id);
+				directory),
+			id,
+			directory);
 	}
 
 	void setFileDates(const QString &path, TimeId date) const {
@@ -581,12 +763,17 @@ private:
 			_session,
 			SharedMediaMergedKey(
 				SparseIdsMergedSlice::Key(
-					_scope.peerId,
-					_scope.topicRootId,
-					_scope.monoforumPeerId,
-					_scope.migratedPeerId,
+					_request.scope.peerId,
+					_request.scope.topicRootId,
+					_request.scope.monoforumPeerId,
+					_request.scope.migratedPeerId,
 					aroundId),
-				_scope.type),
+				_request.types.contains(Type::Photo)
+					&& _request.types.contains(Type::Video)
+				? Type::PhotoVideo
+				: _request.types.contains(Type::Video)
+				? Type::Video
+				: Type::Photo),
 			kPageSize,
 			1);
 		const auto weak = weak_from_this();
@@ -650,7 +837,7 @@ private:
 
 	StartResult startItem(FullMsgId id) {
 		const auto item = _session->data().message(id);
-		const auto peer = _session->data().peer(_scope.peerId);
+		const auto peer = _session->data().peer(_request.scope.peerId);
 		if (!item
 			|| !peer->allowsForwarding()
 			|| item->forbidsForward()
@@ -664,28 +851,54 @@ private:
 			++_current.skipped;
 			return StartResult::Terminal;
 		}
+		const auto date = item->date();
+		const auto localDate = base::unixtime::parse(date).date();
+		if ((!_request.fromDate.isNull() && localDate < _request.fromDate)
+			|| (!_request.toDate.isNull() && localDate > _request.toDate)
+			|| (_request.senderId && item->author()->id != _request.senderId)) {
+			++_current.filteredOut;
+			return StartResult::Terminal;
+		}
 
 		if (const auto photo = media->photo()) {
-			if (_scope.type == Type::Video) {
+			if (!_request.types.contains(Type::Photo)) {
 				++_current.skipped;
 				return StartResult::Terminal;
 			} else if (hasActivePhoto(photo)) {
 				return StartResult::Deferred;
 			}
+			const auto size = photo->imageByteSize(Data::PhotoSize::Large);
+			if ((_request.minimumSize > 0 && size < _request.minimumSize)
+				|| (_request.maximumSize > 0 && size > _request.maximumSize)) {
+				++_current.filteredOut;
+				return StartResult::Terminal;
+			}
 			const auto view = photo->createMediaView();
 			if (!view) {
 				recordFailure(
-					QFileInfo(photoPath(id)).fileName(),
+					id,
+					Type::Photo,
+					FailureCategory::Prepare,
+					u"photo"_q,
 					u"Could not prepare the photo for download."_q);
 				return StartResult::Terminal;
 			}
-			const auto path = photoPath(id);
-			const auto date = photo->date() ? photo->date() : item->date();
+			const auto mediaDate = photo->date() ? photo->date() : date;
+			const auto directory = directoryFor(
+				item,
+				Type::Photo,
+				mediaDate);
+			if (directory.isEmpty()) {
+				recordFailure(id, Type::Photo, FailureCategory::Destination,
+					u"photo"_q, u"Could not create the destination folder."_q);
+				return StartResult::Terminal;
+			}
+			const auto path = photoPath(id, directory);
 			_active.push_back({
 				.id = id,
 				.name = QFileInfo(path).fileName(),
 				.path = path,
-				.date = date,
+				.date = mediaDate,
 				.photo = photo,
 				.photoView = view,
 			});
@@ -695,13 +908,26 @@ private:
 		}
 
 		if (const auto document = media->document()) {
-			if (_scope.type == Type::Photo || !document->isVideoFile()) {
+			if (!_request.types.contains(Type::Video)
+				|| !document->isVideoFile()) {
 				++_current.skipped;
 				return StartResult::Terminal;
 			} else if (hasActiveDocument(document)) {
 				return StartResult::Deferred;
 			}
-			const auto path = documentPath(id, document);
+			const auto size = document->size;
+			if ((_request.minimumSize > 0 && size < _request.minimumSize)
+				|| (_request.maximumSize > 0 && size > _request.maximumSize)) {
+				++_current.filteredOut;
+				return StartResult::Terminal;
+			}
+			const auto directory = directoryFor(item, Type::Video, date);
+			if (directory.isEmpty()) {
+				recordFailure(id, Type::Video, FailureCategory::Destination,
+					u"video"_q, u"Could not create the destination folder."_q);
+				return StartResult::Terminal;
+			}
+			const auto path = documentPath(id, document, directory);
 			const auto waitingForExisting = document->loading();
 			_active.push_back({
 				.id = id,
@@ -722,7 +948,9 @@ private:
 	}
 
 	void fillSlots() {
-		if (_current.stopping || _filling) {
+		if (_current.stopping
+			|| _current.state != State::Running
+			|| _filling) {
 			return;
 		}
 		_filling = true;
@@ -788,6 +1016,9 @@ private:
 				recordRecentlySaved(i->name);
 			} else {
 				recordFailure(
+					i->id,
+					i->photo ? Type::Photo : Type::Video,
+					FailureCategory::Save,
 					i->name,
 					u"Could not save the downloaded file."_q);
 			}
@@ -796,7 +1027,14 @@ private:
 		_checking = false;
 		publish();
 
-		if (refill && changed && !_filling && !_current.stopping) {
+		if (_current.state == State::Pausing && _active.empty()) {
+			_current.state = State::Paused;
+		}
+		if (refill
+			&& changed
+			&& !_filling
+			&& !_current.stopping
+			&& _current.state == State::Running) {
 			fillSlots();
 		} else {
 			finishIfDone();
@@ -819,6 +1057,7 @@ private:
 	}
 
 	void finish() {
+		_current.state = State::Finished;
 		_current.finished = true;
 		publish();
 		if (_backgroundToast.get() && _finishedCallback) {
@@ -835,9 +1074,20 @@ private:
 		});
 	}
 
-	void recordFailure(QString name, QString reason) {
+	void recordFailure(
+			FullMsgId id,
+			Type type,
+			FailureCategory category,
+			QString name,
+			QString reason) {
 		++_current.failed;
-		_current.failures.push_back({ std::move(name), std::move(reason) });
+		_current.failures.push_back({
+			.id = id,
+			.type = type,
+			.category = category,
+			.name = std::move(name),
+			.reason = std::move(reason),
+		});
 	}
 
 	void recordRecentlySaved(QString name) {
@@ -869,11 +1119,14 @@ private:
 			_current.active.push_back(std::move(progress));
 		}
 		_updates.fire_copy(_current);
+		if (_changedCallback) {
+			_changedCallback();
+		}
 	}
 
 	const not_null<Main::Session*> _session;
-	const base::weak_ptr<Window::SessionController> _controller;
-	const Scope _scope;
+	base::weak_ptr<Window::SessionController> _controller;
+	const Request _request;
 	Progress _current;
 	std::deque<FullMsgId> _pending;
 	std::vector<Active> _active;
@@ -897,16 +1150,318 @@ private:
 	base::weak_ptr<Ui::Toast::Instance> _backgroundToast;
 	Fn<void()> _showDetails;
 	Fn<void(Progress)> _finishedCallback;
+	Fn<void()> _changedCallback;
 
 };
 
-[[nodiscard]] inline QString Title(Type type) {
-	switch (type) {
-	case Type::Photo: return u"Save all photos"_q;
-	case Type::Video: return u"Save all videos"_q;
-	case Type::PhotoVideo: return u"Save all media"_q;
-	default: return u"Save all media"_q;
+class Manager final {
+public:
+	explicit Manager(not_null<Main::Session*> session)
+	: _session(session)
+	, _persistTimer([=] { persist(); }) {
+		load();
 	}
+
+	~Manager() {
+		persist();
+	}
+
+	[[nodiscard]] std::shared_ptr<Job> create(
+			not_null<Window::SessionController*> controller,
+			Request request) {
+		auto job = std::make_shared<Job>(_session, controller, std::move(request));
+		attach(job);
+		_jobs.push_back(std::move(job));
+		persistDelayed();
+		return _jobs.back();
+	}
+
+	void show(not_null<Window::SessionController*> controller) {
+		controller->show(Box([=](not_null<Ui::GenericBox*> box) {
+			box->setTitle(rpl::single(u"Bulk media saves"_q));
+			for (auto i = 0; i != _jobs.size(); ++i) {
+				const auto job = _jobs[i];
+				job->attachController(controller);
+				const auto row = box->addRow(object_ptr<Ui::FlatLabel>(
+					box,
+					u"%1 — %2"_q.arg(Title(job->request().types))
+						.arg(StateText(job->state())),
+					st::boxLabel));
+				job->progressValue() | rpl::on_next([row, job](const Progress &value) {
+					row->setText(u"%1 — %2 (%3 saved, %4 failed)"_q
+						.arg(Title(job->request().types))
+						.arg(StateText(value.state))
+						.arg(value.saved)
+						.arg(value.failed));
+				}, box->lifetime());
+				box->addLeftButton(rpl::single(u"Show progress"_q),
+					[=] {
+						box->closeBox();
+						showProgress(controller, job);
+					});
+				if (job->state() == State::Running) {
+					box->addLeftButton(rpl::single(u"Pause"_q), [job] {
+						job->pause();
+					});
+				} else if (job->state() == State::Paused) {
+					box->addLeftButton(rpl::single(u"Resume"_q), [job] {
+						job->resume();
+					});
+				}
+				if (job->state() == State::Running
+					|| job->state() == State::Pausing
+					|| job->state() == State::Paused) {
+					box->addLeftButton(rpl::single(u"Cancel"_q), [job] {
+						job->cancel();
+					});
+				}
+				if (job->canRetry()) {
+					box->addLeftButton(rpl::single(u"Retry failed"_q), [=] {
+						retry(controller, job);
+					});
+				}
+				if (i + 1 != _jobs.size()) {
+					box->addRow(object_ptr<Ui::RpWidget>(box));
+				}
+			}
+			for (const auto &attention : _attention) {
+				box->addRow(object_ptr<Ui::FlatLabel>(
+					box,
+					u"Needs attention — %1"_q.arg(attention),
+					st::boxLabel));
+			}
+			box->addButton(tr::lng_close(), [=] { box->closeBox(); });
+		}));
+	}
+
+private:
+	static constexpr auto kKey = "ayu_bulk_media_save_jobs_v1";
+
+	void attach(const std::shared_ptr<Job> &job) {
+		job->setChangedCallback([this] { persistDelayed(); });
+	}
+
+	void retry(
+			not_null<Window::SessionController*> controller,
+			const std::shared_ptr<Job> &job) {
+		auto request = job->request();
+		const auto failed = job->failures();
+		auto retryJob = std::make_shared<Job>(
+			_session,
+			controller,
+			std::move(request));
+		for (const auto &failure : failed) {
+			if (failure.id) {
+				retryJob->_pending.push_back(failure.id);
+				retryJob->_seen.emplace(
+					failure.id.peer.value,
+					failure.id.msg.bare);
+			}
+		}
+		retryJob->_enumerationDone = true;
+		retryJob->_current.total = int(retryJob->_pending.size());
+		attach(retryJob);
+		_jobs.push_back(std::move(retryJob));
+		_jobs.back()->start();
+		persistDelayed();
+	}
+
+	void showProgress(
+			not_null<Window::SessionController*> controller,
+			const std::shared_ptr<Job> &job) {
+		job->attachController(controller);
+		controller->show(Box([=](not_null<Ui::GenericBox*> box) {
+			box->setTitle(rpl::single(Title(job->request().types)));
+			const auto progress = box->addRow(object_ptr<ProgressWidget>(
+				box,
+				job->request().destination));
+			const auto pause = box->addButton(rpl::single(u"Pause"_q), [job] {
+				job->pause();
+			});
+			job->progressValue() | rpl::on_next([pause, progress](
+					const Progress &value) {
+				progress->setProgress(value);
+				pause->setText(rpl::single(
+					(value.state == State::Paused)
+						? u"Resume"_q
+						: u"Pause"_q));
+				pause->setDisabled(
+					value.finished || value.state == State::Pausing);
+			}, progress->lifetime());
+			pause->setClickedCallback([job, pause] {
+			if (job->state() == State::Paused) {
+				job->resume();
+			} else {
+				job->pause();
+			}
+		});
+			box->addButton(tr::lng_close(), [=] { box->closeBox(); });
+		}));
+	}
+
+	void persistDelayed() {
+		_persistTimer.callOnce(crl::time(1000));
+	}
+
+	void persist() {
+		QByteArray data;
+		QDataStream stream(&data, QIODevice::WriteOnly);
+		stream << quint32(1) << quint32(_jobs.size());
+		for (const auto &job : _jobs) {
+			const auto &request = job->request();
+			stream << quint64(_session->uniqueId());
+			stream << qint64(request.scope.peerId.value)
+				<< qint64(request.scope.topicRootId.bare)
+				<< qint64(request.scope.monoforumPeerId.value)
+				<< qint64(request.scope.migratedPeerId.value);
+			stream << quint8(request.types.contains(Type::Photo))
+				<< quint8(request.types.contains(Type::Video))
+				<< request.fromDate << request.toDate
+				<< qint64(request.senderId.value)
+				<< qint64(request.minimumSize)
+				<< qint64(request.maximumSize)
+				<< quint8(request.layout)
+				<< request.destination;
+			stream << quint8(job->state())
+				<< qint64(job->_nextAroundId.bare)
+				<< quint8(job->_enumerationDone)
+				<< quint8(job->_started)
+				<< quint32(job->_pending.size())
+				<< quint32(job->_seen.size());
+			for (const auto &id : job->_pending) {
+				stream << qint64(id.peer.value) << qint64(id.msg.bare);
+			}
+			for (const auto &[peer, message] : job->_seen) {
+				stream << quint64(peer) << qint64(message);
+			}
+			const auto &progress = job->_current;
+			stream << qint32(progress.discovered)
+				<< qint32(progress.saved)
+				<< qint32(progress.skipped)
+				<< qint32(progress.filteredOut)
+				<< qint32(progress.failed);
+			stream << quint32(progress.failures.size());
+			for (const auto &failure : progress.failures) {
+				stream << qint64(failure.id.peer.value)
+					<< qint64(failure.id.msg.bare)
+					<< quint8(failure.type)
+					<< quint8(failure.category)
+					<< failure.name << failure.reason;
+			}
+		}
+		if (stream.status() == QDataStream::Ok) {
+			_session->local().writePrefGeneric(kKey, data);
+		}
+	}
+
+	void load() {
+		const auto data = _session->local().readPrefGeneric(kKey);
+		if (!data) {
+			return;
+		}
+		QDataStream stream(*data);
+		quint32 version = 0;
+		quint32 count = 0;
+		stream >> version >> count;
+		if (version != 1 || count > 1000) {
+			_attention.push_back(u"Invalid saved bulk-media job data"_q);
+			return;
+		}
+		for (auto i = 0u; i != count && stream.status() == QDataStream::Ok; ++i) {
+			quint64 sessionId = 0;
+			stream >> sessionId;
+			if (sessionId != _session->uniqueId()) {
+				_attention.push_back(u"A saved bulk-media job belongs to another account"_q);
+				return;
+			}
+			Request request;
+			qint64 peer = 0;
+			qint64 topic = 0;
+			qint64 sublist = 0;
+			qint64 migrated = 0;
+			quint8 photo = 0;
+			quint8 video = 0;
+			quint8 layout = 0;
+			stream >> peer >> topic >> sublist >> migrated
+				>> photo >> video >> request.fromDate >> request.toDate;
+			qint64 sender = 0;
+			stream >> sender >> request.minimumSize >> request.maximumSize
+				>> layout >> request.destination;
+			request.scope = {
+				.peerId = PeerId(peer),
+				.topicRootId = MsgId(topic),
+				.monoforumPeerId = PeerId(sublist),
+				.migratedPeerId = PeerId(migrated),
+			};
+			request.types = {};
+			if (photo) request.types.added(Type::Photo);
+			if (video) request.types.added(Type::Video);
+			request.senderId = PeerId(sender);
+			request.layout = Layout(layout);
+			quint8 state = 0;
+			qint64 next = 0;
+			quint8 done = 0;
+			quint8 started = 0;
+			quint32 pending = 0;
+			quint32 seen = 0;
+			stream >> state >> next >> done >> started >> pending >> seen;
+			if (pending > 100000 || seen > 1000000) return;
+			auto job = std::make_shared<Job>(_session, nullptr, request);
+			job->_current.state = (State(state) == State::Finished)
+				? State::Finished
+				: State::Paused;
+			job->_current.finished = (job->_current.state == State::Finished);
+			job->_nextAroundId = MsgId(next);
+			job->_enumerationDone = done;
+			job->_started = false;
+			for (auto j = 0u; j != pending; ++j) {
+				qint64 p = 0; qint64 m = 0;
+				stream >> p >> m;
+				job->_pending.push_back({ PeerId(p), MsgId(m) });
+			}
+			for (auto j = 0u; j != seen; ++j) {
+				quint64 p = 0; qint64 m = 0;
+				stream >> p >> m;
+				job->_seen.emplace(p, m);
+			}
+			stream >> job->_current.discovered
+				>> job->_current.saved
+				>> job->_current.skipped
+				>> job->_current.filteredOut
+				>> job->_current.failed;
+			quint32 failures = 0;
+			stream >> failures;
+			for (auto j = 0u; j != failures; ++j) {
+				Failure failure;
+				qint64 p = 0; qint64 m = 0;
+				quint8 type = 0; quint8 category = 0;
+				stream >> p >> m >> type >> category
+					>> failure.name >> failure.reason;
+				failure.id = { PeerId(p), MsgId(m) };
+				failure.type = Type(type);
+				failure.category = FailureCategory(category);
+				job->_current.failures.push_back(std::move(failure));
+			}
+			if (stream.status() != QDataStream::Ok) return;
+			attach(job);
+			_jobs.push_back(std::move(job));
+		}
+	}
+
+	const not_null<Main::Session*> _session;
+	std::vector<std::shared_ptr<Job>> _jobs;
+	std::vector<QString> _attention;
+	base::Timer _persistTimer;
+};
+
+[[nodiscard]] inline QString Title(
+		const Storage::SharedMediaTypesMask &types) {
+	if (types.contains(Type::Photo) && types.contains(Type::Video)) {
+		return u"Save all media"_q;
+	}
+	return types.contains(Type::Video)
+		? u"Save all videos"_q
+		: u"Save all photos"_q;
 }
 
 [[nodiscard]] inline QString CompletionText(const Progress &progress) {
@@ -916,24 +1471,28 @@ private:
 			: u"No saveable media found."_q;
 	}
 	if (!progress.saved) {
-		return u"No media was saved. %1 downloads failed."_q
+		return u"No media was saved. %1 skipped • %2 filtered • %3 failed."_q
+			.arg(progress.skipped)
+			.arg(progress.filteredOut)
 			.arg(progress.failed);
 	}
 	if (progress.cancelled) {
-		return u"Stopped after saving %1 items • %2 skipped • %3 failed"_q
+		return u"Stopped after saving %1 items • %2 skipped • %3 filtered • %4 failed"_q
 			.arg(progress.saved)
 			.arg(progress.skipped)
+			.arg(progress.filteredOut)
 			.arg(progress.failed);
 	}
-	return u"Saved %1 items • %2 skipped • %3 failed"_q
+	return u"Saved %1 items • %2 skipped • %3 filtered • %4 failed"_q
 		.arg(progress.saved)
 		.arg(progress.skipped)
+		.arg(progress.filteredOut)
 		.arg(progress.failed);
 }
 
-inline void Start(
+inline void StartJob(
 		not_null<Window::SessionController*> controller,
-		Scope scope) {
+		Request request) {
 	const auto initialPath = [] {
 		const auto path = Core::App().settings().downloadPath();
 		if (!path.isEmpty() && path != FileDialog::Tmp()) {
@@ -946,25 +1505,24 @@ inline void Start(
 		controller->window().widget().get(),
 		tr::lng_download_path_choose(tr::now),
 		initialPath,
-		[weak, scope = std::move(scope)](QString &&result) mutable {
+		[weak, request = std::move(request)](QString &&result) mutable {
 			const auto controller = weak.get();
 			if (!controller || result.isEmpty()) {
 				return;
 			}
-			scope.destination = result.endsWith('/')
+			request.destination = result.endsWith('/')
 				? std::move(result)
 				: (std::move(result) + '/');
-			if (!QDir().mkpath(scope.destination)) {
+			if (!QDir().mkpath(request.destination)) {
 				controller->showToast(u"Could not create the destination folder."_q);
 				return;
 			}
 
-			const auto title = Title(scope.type);
-			const auto destination = scope.destination;
-			const auto job = std::make_shared<Job>(
-				&controller->session(),
+			const auto title = Title(request.types);
+			const auto destination = request.destination;
+			const auto job = controller->session().bulkSave().create(
 				controller,
-				std::move(scope));
+				std::move(request));
 			const auto weakJob = std::weak_ptr<Job>(job);
 			const auto showDetails = [weak, weakJob, title, destination] {
 				const auto controller = weak.get();
@@ -1056,6 +1614,113 @@ inline void Start(
 			job->start();
 			showDetails();
 		});
+}
+
+inline void Start(
+		not_null<Window::SessionController*> controller,
+		Request request) {
+	controller->show(Box([=](not_null<Ui::GenericBox*> box) {
+		box->setTitle(rpl::single(u"Save media"_q));
+		const auto photos = box->addRow(object_ptr<Ui::Checkbox>(
+			box,
+			u"Photos"_q,
+			request.types.contains(Type::Photo),
+			st::defaultBoxCheckbox));
+		const auto videos = box->addRow(object_ptr<Ui::Checkbox>(
+			box,
+			u"Videos"_q,
+			request.types.contains(Type::Video),
+			st::defaultBoxCheckbox));
+		const auto from = box->addRow(object_ptr<Ui::InputField>(
+			box,
+			st::defaultInputField,
+			rpl::single(u"From date (YYYY-MM-DD), optional"_q)));
+		const auto to = box->addRow(object_ptr<Ui::InputField>(
+			box,
+			st::defaultInputField,
+			rpl::single(u"To date (YYYY-MM-DD), optional"_q)));
+		const auto minimum = box->addRow(object_ptr<Ui::InputField>(
+			box,
+			st::defaultInputField,
+			rpl::single(u"Minimum size in bytes, optional"_q)));
+		const auto maximum = box->addRow(object_ptr<Ui::InputField>(
+			box,
+			st::defaultInputField,
+			rpl::single(u"Maximum size in bytes, optional"_q)));
+		const auto sender = box->addRow(object_ptr<Ui::InputField>(
+			box,
+			st::defaultInputField,
+			rpl::single(u"Sender peer ID, optional"_q)));
+		const auto layoutGroup = std::make_shared<Ui::RadioenumGroup<Layout>>(
+			request.layout);
+		box->addRow(object_ptr<Ui::Radioenum<Layout>>(
+			box, layoutGroup, Layout::Flat, u"Flat"_q));
+		box->addRow(object_ptr<Ui::Radioenum<Layout>>(
+			box, layoutGroup, Layout::Type, u"By media type"_q));
+		box->addRow(object_ptr<Ui::Radioenum<Layout>>(
+			box, layoutGroup, Layout::YearMonth, u"By year and month"_q));
+		box->addRow(object_ptr<Ui::Radioenum<Layout>>(
+			box, layoutGroup, Layout::Topic, u"By topic"_q));
+		box->addButton(rpl::single(u"Save"_q), [=] {
+			if (!photos->checked() && !videos->checked()) {
+				return;
+			}
+			const auto parseDate = [](const QString &text) {
+				const auto value = text.trimmed();
+				return value.isEmpty()
+					? QDate()
+					: QDate::fromString(value, Qt::ISODate);
+			};
+			const auto parseSize = [](const QString &text) {
+				bool ok = false;
+				const auto value = text.trimmed().toLongLong(&ok);
+				return (ok && value > 0) ? value : int64(0);
+			};
+			const auto fromDate = parseDate(from->getLastText());
+			const auto toDate = parseDate(to->getLastText());
+			const auto minSize = parseSize(minimum->getLastText());
+			const auto maxSize = parseSize(maximum->getLastText());
+			bool senderOk = false;
+			const auto senderValue = sender->getLastText().trimmed();
+			const auto senderId = senderValue.isEmpty()
+				? PeerId()
+				: PeerId(PeerIdHelper(senderValue.toULongLong(&senderOk)));
+			if ((!from->getLastText().trimmed().isEmpty() && !fromDate.isValid())
+				|| (!to->getLastText().trimmed().isEmpty() && !toDate.isValid())
+				|| (fromDate.isValid() && toDate.isValid() && fromDate > toDate)) {
+				from->showError();
+				to->showError();
+				return;
+			}
+			if ((!minimum->getLastText().trimmed().isEmpty() && !minSize)
+				|| (!maximum->getLastText().trimmed().isEmpty() && !maxSize)
+				|| (minSize && maxSize && minSize > maxSize)) {
+				minimum->showError();
+				maximum->showError();
+				return;
+			}
+			if (!senderValue.isEmpty() && !senderOk) {
+				sender->showError();
+				return;
+			}
+			request.types = Storage::SharedMediaTypesMask{};
+			if (photos->checked()) {
+				request.types.added(Type::Photo);
+			}
+			if (videos->checked()) {
+				request.types.added(Type::Video);
+			}
+			request.fromDate = fromDate;
+			request.toDate = toDate;
+			request.minimumSize = minSize;
+			request.maximumSize = maxSize;
+			request.senderId = senderId;
+			request.layout = layoutGroup->current();
+			box->closeBox();
+			StartJob(controller, std::move(request));
+		});
+		box->addButton(tr::lng_cancel(), [=] { box->closeBox(); });
+	}));
 }
 
 } // namespace Info::Media::BulkSave

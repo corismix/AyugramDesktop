@@ -65,6 +65,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "window/themes/window_theme.h"
 #include "window/window_controller.h"
 #include "window/window_main_menu_helpers.h"
+#include "info/media/info_media_bulk_save.h"
 #include "window/window_peer_menu.h"
 #include "window/window_session_controller.h"
 #include "styles/style_chat.h" // popupMenuExpandedSeparator
@@ -840,6 +841,12 @@ void MainMenu::setupMenu() {
 		{ &st::menuIconSettings }
 	)->setClickedCallback([=] {
 		controller->showSettings();
+	});
+	addAction(
+		rpl::single(u"Bulk media saves"_q),
+		{ &st::menuIconDownload }
+	)->setClickedCallback([=] {
+		controller->session().bulkSave().show(controller);
 	});
 
 	if (settings.showNightModeToggleInDrawer()) {

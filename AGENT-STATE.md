@@ -1,5 +1,14 @@
 # Current State
 
+Phase 4 implementation is present but not build- or runtime-verified. The
+bulk-save job now has explicit running/pausing/paused/cancelling/finished
+states, retryable failure IDs, manager ownership from `Main::Session`,
+account-local versioned checkpoints, restored-paused jobs, and a main-menu jobs
+surface. Existing phase-3 filters/layouts and normal Telegram media save paths
+remain in the same job. Source checks passed; compilation, relaunch restore,
+pause/resume, retry, and manual UI behavior remain pending because this
+checkout must not be built without explicit authorization.
+
 Bulk Media Save MVP and Phase 2 are complete. A macOS crash report showed
 stack exhaustion while paginating cached media: synchronous RPL emissions
 re-entered `loadPage()` through `handlePage()` and `fillSlots()`. The page

@@ -6,6 +6,7 @@ For license and copyright information please follow this link:
 https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "main/main_session.h"
+#include "info/media/info_media_bulk_save.h"
 
 #include "apiwrap.h"
 #include "api/api_peer_colors.h"
@@ -153,6 +154,7 @@ Session::Session(
 , _storage(std::make_unique<Storage::Facade>())
 , _data(std::make_unique<Data::Session>(this))
 , _user(_data->processUser(user))
+, _bulkSave(std::make_unique<Info::Media::BulkSave::Manager>(this))
 , _emojiStickersPack(std::make_unique<Stickers::EmojiPack>(this))
 , _diceStickersPacks(std::make_unique<Stickers::DicePacks>(this))
 , _giftBoxStickersPacks(std::make_unique<Stickers::GiftBoxPack>(this))
