@@ -586,135 +586,247 @@ Cover repeated filenames, deleted messages, protected content, disconnect/reconn
 
 ---
 
-# Post-MVP roadmap
+# Post-MVP architecture and implementation plan
 
-## Phase 2 — Make bulk save available directly from chats/topics (complete)
+## Current baseline
 
-**Completed 2026-08-31.** The chat/topic menu now opens a Photos/Videos chooser
-and launches the MVP bulk-save job with the active peer, topic, Saved Messages
-sublist, and migrated-history scope.
+**MVP and Phase 2 are complete as of 2026-08-31.** One `BulkSave::Scope`
+describes a chat, topic, Saved Messages sublist, and migrated-history scope.
+Both Shared Media and the chat/topic menu build that scope and call the same
+`BulkSave::Start(...)` entry point. `Job` already owns paged discovery,
+restriction checks, a bounded active queue, filenames, per-item progress, and
+completion reporting.
 
-Add **Save media…** to a chat/topic-level menu so the user does not need to enter Shared Media first.
+The remaining work must extend that single job. A new dialog, media type, or
+destination layout is not a reason to create another enumerator, downloader,
+or save loop.
 
-Suggested dialog:
+Before a new feature phase, validate the current hardening changes with the
+same realistic macOS batch that exposed the pagination and output-path bugs:
+
+- cached multi-page media must not recursively re-enter page loading;
+- photos and videos must land under the folder selected by the user;
+- album expansion must save each loaded member once; and
+- existing collision protection and cancellation behavior must remain intact.
+
+This is a release gate for the current implementation, not a reason to expand
+the feature before it is verified.
+
+## Target architecture
+
+Keep `Scope` as the immutable *where* of a job, and introduce a value-like
+`Options` object for the immutable *what* and *how*:
 
 ```text
-Save media from: [Current topic / This chat]
+BulkSave::Request
+├── Scope
+│   ├── peerId / topicRootId / monoforumPeerId / migratedPeerId
+│   └── discovery media-type mask
+├── SelectionOptions
+│   ├── requested media kinds
+│   ├── optional inclusive date interval
+│   ├── optional sender and size limits
+│   └── current topic or explicitly selected all-topics scope
+└── DestinationOptions
+    ├── root directory
+    ├── flat / media type / year-month / topic layout
+    └── stable collision-safe filename policy
+```
 
-Types
-[x] Photos
-[x] Videos
-[ ] GIFs
-[ ] Files
+The UI collects a draft of those values, validates it, and passes one immutable
+request to `Start`. The job remains the sole owner of progress and mutable run
+state. Do not let a box or menu callback retain a live filter model and affect
+a job that has already started.
 
-Range
-(o) All time
-( ) Date range
+Internally, make extension points explicit rather than growing `startItem()`
+into a long sequence of conditionals:
 
-Destination: …
+```text
+Shared Media page
+        ↓ FullMsgId
+resolve HistoryItem and album members
+        ↓
+MediaAdapter::classify(item, request)
+        ├── skip with a user-meaningful reason
+        └── SaveCandidate { media kind, source ID, date, sender, size,
+                            output-name inputs, normal save primitive }
+        ↓
+DestinationResolver::pathFor(candidate, destination options)
+        ↓
+bounded Job queue → existing PhotoMedia / DocumentData save APIs
+```
+
+`MediaAdapter` is a narrow policy seam, not a second downloader. It decides
+whether a discovered item matches, derives its safe fallback extension/name,
+and starts the existing normal save primitive. `DestinationResolver` is the
+only component that creates relative subdirectories or filename variants; it
+must keep the selected root in every returned path and use the existing safe
+collision helpers. `Job` continues to own queue size, reactive progress,
+terminal counters, cancellation, and lifecycle cleanup.
+
+The discovery media-type mask should be broad enough to find candidates, while
+the adapter applies the exact requested kind and filters after resolving the
+message. This preserves the current behavior for albums, deleted messages,
+restrictions, and remotely loaded slices, and avoids assuming all documents in
+a Shared Media bucket are interchangeable.
+
+## Phase 3 — Selection filters and destination layouts
+
+### User-visible increment
+
+Replace the Phase 2 two-checkbox prompt with one compact configuration box:
+
+```text
+Save media from: This chat / Current topic
+Types:            Photos, Videos
+Date:             All time | From … to …
+Sender:           Anyone | selected sender        (where available)
+Size:             Any size | optional min/max
+Folder layout:    Flat | Type | Year and month | Topic
+Destination:      chosen once when Save is pressed
 
 [Cancel] [Save]
 ```
 
-For the first Phase 2 increment, expose only Photos/Videos even if the dialog architecture anticipates more types.
+Do not expose a control until its scope is unambiguous. In particular,
+“all topics” is a separate scope choice, not a filter toggle while the job is
+inside an active topic, and sender filtering must be unavailable where the
+underlying history item cannot supply a stable sender.
 
-Reuse the exact same `BulkMediaSaveScope` and job. The entry point should contain no downloader logic.
+### Implementation
 
-### Chat/topic menu integration
+1. Replace `Scope::type` with a backward-compatible request/options shape, or
+   add `Options` beside it and keep menu construction helpers thin. Convert the
+   existing Photo, Video, and PhotoVideo calls first so there is still exactly
+   one launch path.
+2. Add `matches(candidate, selectionOptions)` after `HistoryItem` resolution
+   and before a candidate consumes an active queue slot. Count a non-matching
+   item as filtered out, not skipped; surface `filteredOut` separately only if
+   it improves the final summary.
+3. Define date semantics before coding: compare Telegram message/media time in
+   the user's local calendar dates, include the full end date, and store the
+   resulting UTC boundaries in the request. Never infer date boundaries from
+   sparse-page order.
+4. Add `DestinationResolver::directoryFor(...)` and `pathFor(...)`. Create
+   only the required descendants of the selected root, validate write access
+   before beginning a large run, and turn a per-item directory/write failure
+   into `failed` without aborting unrelated candidates.
+5. Keep `_m<message-id>` (and peer identity where required) as the final
+   uniqueness component for every layout and template. Layout names are
+   presentation, not identity.
+6. Add focused tests or source-level coverage for date boundary inclusion,
+   destination containment, collision resolution, topic naming, and a filtered
+   album. Manually verify each layout with a normal chat, forum topic, and
+   migrated history.
 
-Investigate the current history/header menu context and derive:
+### Decisions deferred from Phase 3
 
-- peer;
-- active forum topic root ID;
-- migrated peer where applicable.
+Do not add filename templates, “only not already saved,” all-topic recursion,
+or content hashing in this phase. Each changes identity, scope, or persistence
+semantics and belongs to a later bounded increment.
 
-Do not duplicate topic rules already represented by Shared Media context objects if a reusable scope builder can be extracted.
+## Phase 4 — Additional media kinds
 
----
+Add media kinds one at a time through explicit adapters, in this order:
 
-## Phase 3 — Filters and organization
+1. GIFs / animations;
+2. generic files;
+3. music/audio;
+4. voice messages;
+5. round videos.
 
-Add optional filters without changing the downloader core:
+For each kind, first establish the matching `Storage::SharedMediaType`, the
+actual `HistoryItem`/`DocumentData` predicates, normal save call, safe fallback
+extension, restriction behavior, and whether the media belongs in an existing
+or new UI category. Then add one `MediaAdapter` case and its opt-in checkbox.
 
-- date from/to;
-- photos only / videos only / both;
-- sender filter where meaningful;
-- minimum/maximum file size;
-- current topic vs all topics;
-- optionally only items not already saved.
+Do not treat every `DocumentData` as a video or generic file merely because it
+is downloadable. Voice and round-video handling in particular needs separate
+macOS acceptance: output extension, Quick Look/player behavior, cancellation,
+and progress must be verified before that checkbox is enabled. The existing
+Photos/Videos defaults must remain unchanged.
 
-Add organization options:
+## Phase 5 — Job control and resumability
+
+Implement retry before persistence. A completed job should retain a bounded
+failure record containing `FullMsgId`, media kind, and failure category, so
+**Retry failed** creates a new ordinary job with the same request and only
+those IDs. It must re-resolve session data rather than holding media pointers.
+
+Pause/resume is an in-process state machine:
 
 ```text
-Flat folder
-By media type
-By year/month
-By topic
+running → pausing → paused → running
+        ↘ cancelling → finishing active work → finished
 ```
 
-Add filename templates only if there is a real need. Keep message ID available as a stable uniqueness component.
+Pause stops new page requests and queue refills but leaves already-started
+normal downloads alone unless Telegram provides an ownership-safe pause API.
+Resume restarts discovery from the next cursor and keeps the deduplication set.
+Cancellation remains stronger: discard pending candidates and never schedule
+new work.
 
----
+Only after this behavior is stable, add restart persistence:
 
-## Phase 4 — More Telegram media types
+- persist request/options, destination root/layout, next discovery cursor,
+  seen/saved source IDs or a compact manifest reference, and terminal failures;
+- never serialize `HistoryItem`, `PhotoMedia`, `DocumentData`, widget pointers,
+  or downloader objects;
+- restore a paused job only after its session and peer are available, then
+  re-resolve IDs through session data; and
+- on an account/session mismatch, retain a readable failed/needs-attention
+  record instead of silently applying the job to another account.
 
-Extend the same framework to:
+A small jobs surface can then show active, paused, completed, and failed jobs.
+It should subscribe to job progress; it must not own another save queue.
 
-- GIFs/animations;
-- generic files;
-- music/audio;
-- voice messages;
-- round video messages.
+## Phase 6 — Manifest-backed duplicate awareness
 
-Treat each Shared Media type as an explicit adapter/classification case. Do not assume every `DocumentData` is interchangeable from a UX or filename perspective.
+Introduce a versioned manifest inside the destination root only after job
+persistence has a stable source-ID model. It maps a source identity
+`(account, peer, message ID, media discriminator)` to the final relative path,
+file size, completion status, and optional lightweight file metadata.
 
-Be cautious with voice-message bulk saving on macOS and test it independently before enabling it.
+The first duplicate policy should be cheap and deterministic:
 
----
+- if a completed manifest record resolves to a file with the expected size,
+  skip it as already saved;
+- otherwise use normal collision-safe naming and record the new result;
+- never silently overwrite a user file based solely on matching name or size.
 
-## Phase 5 — Better job control
+Full content hashing is an explicit opt-in repair/verification operation, not
+part of the normal bulk-save path. It can be expensive enough to erase the
+download-throughput benefit, especially for large videos. Manifest writes must
+be atomic or journaled so a crash cannot mark an incomplete file as saved.
 
-Add:
+## Phase 7 — Optional Export Chat History investigation
 
-- Pause / Resume;
-- Retry failed;
-- persistent job state across application restart;
-- resumable enumeration cursor;
-- a small bulk-download jobs/history surface;
-- background completion notifications where appropriate.
+Faster **Export Chat History** remains a separate project. If it is pursued,
+first measure takeout concurrency, CDN handling, Premium/non-Premium behavior,
+and Telegram rate-limit consequences. Do not share its implementation or
+success criteria with Bulk Save: this feature remains on normal media save
+APIs regardless of exporter performance.
 
-Persist identifiers/options, not large media object graphs.
+## Post-MVP validation gates
 
-On resume, re-resolve media from message IDs through the session data layer.
+For every phase, retain these invariants:
 
----
+- no raw MTProto file downloader and no export/takeout path;
+- bounded discovery/active work and no whole-chat materialization;
+- selected destination is preserved in every output path;
+- protected, TTL, deleted, and unsupported items are skipped, never bypassed;
+- cancellation/pause/retry affect only the owning job and not unrelated app
+  downloads;
+- output identity is deterministic across pagination, albums, migrated peers,
+  and a resumed job; and
+- counters distinguish saved, skipped, failed, filtered, and already-saved
+  states where those features are enabled.
 
-## Phase 6 — Duplicate awareness and manifests
-
-Optional advanced behavior:
-
-- skip exact files already present using size/hash where available;
-- write a lightweight manifest mapping `FullMsgId → output path`;
-- allow "resume this folder" without re-saving completed items;
-- detect files moved/renamed since the previous run.
-
-Do not hash every large video in the critical path unless the user enables duplicate checking; filesystem hashing can itself become the bottleneck.
-
----
-
-## Phase 7 — Optional export-speed investigation
-
-Only after the bulk saver is complete, treat faster **Export Chat History** as a separate project.
-
-Possible research:
-
-- make export file-part concurrency real rather than nominal;
-- determine whether takeout sessions impose server-side throughput limits;
-- investigate CDN redirect support in the exporter;
-- compare Premium and non-Premium behavior;
-- determine whether exporter concurrency changes are safe for Telegram rate limits and takeout sessions.
-
-Do not make the bulk-save feature depend on this work. The bulk saver solves the user's media-download use case even if Telegram's exporter remains slow forever.
+Validate each newly enabled media kind and layout with manual desktop evidence
+in a normal chat, a channel, a forum topic, and a migrated history when that
+scope is supported. Build/source checks prove integration only; they do not
+prove folder picker, output placement, active-download presentation, or native
+media playback behavior.
 
 ---
 
