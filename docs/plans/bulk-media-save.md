@@ -796,6 +796,10 @@ and Telegram rate-limit consequences. Do not share its implementation or
 success criteria with Bulk Save: this feature remains on normal media save
 APIs regardless of exporter performance.
 
+**Investigation status:** source audit and benchmark protocol are documented in
+[`bulk-media-save-phase6.md`](bulk-media-save-phase6.md). No exporter code or
+live performance claims were added.
+
 ## Post-MVP validation gates
 
 For every phase, retain these invariants:
