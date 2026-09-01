@@ -22,6 +22,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_shared_media.h"
 #include "data/data_file_origin.h"
 #include "data/data_forum_topic.h"
+#include "data/data_peer.h"
 #include "history/history_item.h"
 #include "history/view/history_view_context_menu.h"
 #include "lang/lang_keys.h"
@@ -946,10 +947,10 @@ private:
 					_request.scope.monoforumPeerId,
 					_request.scope.migratedPeerId,
 					aroundId),
-				_request.types.contains(Type::Photo)
-					&& _request.types.contains(Type::Video)
+				_request.types.test(Type::Photo)
+					&& _request.types.test(Type::Video)
 				? Type::PhotoVideo
-				: _request.types.contains(Type::Video)
+				: _request.types.test(Type::Video)
 				? Type::Video
 				: Type::Photo),
 			kPageSize,
@@ -1039,7 +1040,7 @@ private:
 		}
 
 		if (const auto photo = media->photo()) {
-			if (!_request.types.contains(Type::Photo)) {
+			if (!_request.types.test(Type::Photo)) {
 				++_current.skipped;
 				return StartResult::Terminal;
 			} else if (hasActivePhoto(photo)) {
@@ -1090,7 +1091,7 @@ private:
 		}
 
 		if (const auto document = media->document()) {
-			if (!_request.types.contains(Type::Video)
+			if (!_request.types.test(Type::Video)
 				|| !document->isVideoFile()) {
 				++_current.skipped;
 				return StartResult::Terminal;
@@ -1505,8 +1506,8 @@ private:
 				<< qint64(request.scope.topicRootId.bare)
 				<< qint64(request.scope.monoforumPeerId.value)
 				<< qint64(request.scope.migratedPeerId.value);
-			stream << quint8(request.types.contains(Type::Photo))
-				<< quint8(request.types.contains(Type::Video))
+			stream << quint8(request.types.test(Type::Photo))
+				<< quint8(request.types.test(Type::Video))
 				<< request.fromDate << request.toDate
 				<< qint64(request.senderId.value)
 				<< qint64(request.minimumSize)
@@ -1542,16 +1543,16 @@ private:
 			stream << qint32(progress.alreadySaved);
 		}
 		if (stream.status() == QDataStream::Ok) {
-			_session->local().writePrefGeneric(kKey, data);
+			_session->local().writePref<QByteArray>(kKey, data);
 		}
 	}
 
 	void load() {
-		const auto data = _session->local().readPrefGeneric(kKey);
-		if (!data) {
+		const auto data = _session->local().readPref<QByteArray>(kKey);
+		if (data.isEmpty()) {
 			return;
 		}
-		QDataStream stream(*data);
+		QDataStream stream(data);
 		quint32 version = 0;
 		quint32 count = 0;
 		stream >> version >> count;
@@ -1651,10 +1652,10 @@ private:
 
 [[nodiscard]] inline QString Title(
 		const Storage::SharedMediaTypesMask &types) {
-	if (types.contains(Type::Photo) && types.contains(Type::Video)) {
+	if (types.test(Type::Photo) && types.test(Type::Video)) {
 		return u"Save all media"_q;
 	}
-	return types.contains(Type::Video)
+	return types.test(Type::Video)
 		? u"Save all videos"_q
 		: u"Save all photos"_q;
 }
@@ -1821,12 +1822,12 @@ inline void Start(
 		const auto photos = box->addRow(object_ptr<Ui::Checkbox>(
 			box,
 			u"Photos"_q,
-			request.types.contains(Type::Photo),
+			request.types.test(Type::Photo),
 			st::defaultBoxCheckbox));
 		const auto videos = box->addRow(object_ptr<Ui::Checkbox>(
 			box,
 			u"Videos"_q,
-			request.types.contains(Type::Video),
+			request.types.test(Type::Video),
 			st::defaultBoxCheckbox));
 		const auto from = box->addRow(object_ptr<Ui::InputField>(
 			box,
@@ -1858,7 +1859,7 @@ inline void Start(
 			box, layoutGroup, Layout::YearMonth, u"By year and month"_q));
 		box->addRow(object_ptr<Ui::Radioenum<Layout>>(
 			box, layoutGroup, Layout::Topic, u"By topic"_q));
-		box->addButton(rpl::single(u"Save"_q), [=] {
+		box->addButton(rpl::single(u"Save"_q), [=]() mutable {
 			if (!photos->checked() && !videos->checked()) {
 				return;
 			}

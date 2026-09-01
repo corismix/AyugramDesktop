@@ -1,6 +1,14 @@
 # Current State
 
-Phase 4 implementation is present but not build- or runtime-verified. The
+The pasted macOS compiler failure was fixed in the bulk-save code: enum-mask
+membership now uses `test()`, checkpoint persistence uses the typed account
+preference API, the Save callback owns a mutable request copy, and the bulk-save
+header includes the concrete `PeerData` definition. Source checks and `git
+diff --check` pass, and the user-verified Debug build now completes. Runtime
+behavior remains unverified.
+
+Phase 4 implementation is present and build-verified but not runtime-verified.
+The
 bulk-save job now has explicit running/pausing/paused/cancelling/finished
 states, retryable failure IDs, manager ownership from `Main::Session`,
 account-local versioned checkpoints, restored-paused jobs, and a main-menu jobs
@@ -22,5 +30,5 @@ saves to the process working directory. Discovered messages expand through
 `Session::itemOrItsGroup()` so loaded album members are queued together and
 deduplicated.
 
-Source validation passed; build and runtime reproduction remain pending because
-the repository guide says not to build this checkout unless explicitly asked.
+Source validation and the user-run Debug build passed; runtime reproduction
+remains pending.
