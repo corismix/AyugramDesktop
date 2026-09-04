@@ -83,6 +83,7 @@ jobs:
 
           ./configure.sh \
           -D CMAKE_CONFIGURATION_TYPES=Debug \
+          -D CMAKE_OSX_ARCHITECTURES=arm64 \
           -D CMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO \
           -D TDESKTOP_API_ID="$TDESKTOP_API_ID" \
           -D TDESKTOP_API_HASH="$TDESKTOP_API_HASH"
