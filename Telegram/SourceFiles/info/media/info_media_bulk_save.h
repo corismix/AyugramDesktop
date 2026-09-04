@@ -1587,8 +1587,8 @@ private:
 				.migratedPeerId = PeerId(migrated),
 			};
 			request.types = {};
-			if (photo) request.types.added(Type::Photo);
-			if (video) request.types.added(Type::Video);
+			if (photo) request.types = request.types.added(Type::Photo);
+			if (video) request.types = request.types.added(Type::Video);
 			request.senderId = PeerId(sender);
 			request.layout = Layout(layout);
 			quint8 state = 0;
@@ -1903,10 +1903,10 @@ inline void Start(
 			}
 			request.types = Storage::SharedMediaTypesMask{};
 			if (photos->checked()) {
-				request.types.added(Type::Photo);
+				request.types = request.types.added(Type::Photo);
 			}
 			if (videos->checked()) {
-				request.types.added(Type::Video);
+				request.types = request.types.added(Type::Video);
 			}
 			request.fromDate = fromDate;
 			request.toDate = toDate;
