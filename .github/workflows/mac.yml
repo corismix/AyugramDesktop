@@ -47,7 +47,13 @@ jobs:
           # Disable spotlight.
           sudo mdutil -a -i off || true
 
-          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          # lib_translate's Swift Translation provider needs the macOS 15 SDK
+          # (Translation.framework); the image default Xcode is too old.
+          XCODE=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          echo "Using Xcode: $XCODE"
+          sudo xcode-select -s "$XCODE/Contents/Developer"
+          xcodebuild -version
+          swiftc --version
 
           GNU_CMAKE=/opt/homebrew/share/cmake/Modules/Compiler/GNU.cmake
           if [ -f "$GNU_CMAKE" ]; then
