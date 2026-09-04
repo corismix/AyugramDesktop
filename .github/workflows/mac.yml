@@ -1,0 +1,98 @@
+name: macOS build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/bulk-media-save-mvp
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - 'LEGAL'
+      - 'LICENSE'
+      - '.github/**'
+      - '!.github/workflows/mac.yml'
+      - 'Telegram/build/docker/**'
+      - 'Telegram/Resources/uwp/**'
+      - 'Telegram/Resources/winrc/**'
+      - 'Telegram/SourceFiles/platform/win/**'
+      - 'Telegram/SourceFiles/platform/linux/**'
+      - 'Telegram/configure.bat'
+
+jobs:
+  macos:
+    name: macOS (Apple Silicon, Debug)
+    runs-on: macos-14
+    timeout-minutes: 360
+    env:
+      REPO_NAME: ayugram
+      PREPARE_PATH: Telegram/build/prepare/prepare.py
+      TDESKTOP_API_ID: ${{ secrets.TDESKTOP_API_ID || '2040' }}
+      TDESKTOP_API_HASH: ${{ secrets.TDESKTOP_API_HASH || 'b18441a1ff607e10a989891a5462e627' }}
+
+    steps:
+      - name: Clone.
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          path: ${{ env.REPO_NAME }}
+
+      - name: Set up.
+        run: |
+          sudo chown -R `whoami`:admin /usr/local/share || true
+
+          brew update
+          brew install automake libtool meson nasm ninja pkg-config
+
+          # Disable spotlight.
+          sudo mdutil -a -i off || true
+
+          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+
+          GNU_CMAKE=/opt/homebrew/share/cmake/Modules/Compiler/GNU.cmake
+          if [ -f "$GNU_CMAKE" ]; then
+            sudo sed -i '' '/CMAKE_${lang}_FLAGS_DEBUG_INIT/s/ -g//' "$GNU_CMAKE"
+          fi
+
+      - name: Libraries cache.
+        id: cache-libs
+        uses: actions/cache@v6
+        with:
+          path: |
+            Libraries
+            ThirdParty
+          key: ${{ runner.OS }}-${{ runner.Arch }}-libs-${{ hashFiles(format('{0}/{1}', env.REPO_NAME, env.PREPARE_PATH)) }}
+          restore-keys: ${{ runner.OS }}-${{ runner.Arch }}-libs-
+
+      - name: Libraries.
+        run: |
+          ./$REPO_NAME/Telegram/build/prepare/mac.sh skip-release silent
+
+      - name: Free up some disk space.
+        run: find Libraries '(' '(' ! '(' -name '*.a' -o -name '*.h' -o -name '*.hpp' -o -name '*.inc' -o -name '*.cmake' -o -name '*.pc' -o -path '*/include/*' -o -path '*/objects-*' -o -path '*/cache_keys/*' -o -path '*/patches/*' -o -perm +111 ')' -type f ')' -o -empty ')' -delete
+
+      - name: AyuGram build.
+        run: |
+          cd $REPO_NAME/Telegram
+
+          ./configure.sh \
+          -D CMAKE_CONFIGURATION_TYPES=Debug \
+          -D CMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO \
+          -D TDESKTOP_API_ID="$TDESKTOP_API_ID" \
+          -D TDESKTOP_API_HASH="$TDESKTOP_API_HASH"
+
+          cmake --build ../out --config Debug --parallel
+
+      - name: Move artifact.
+        run: |
+          cd $REPO_NAME/out/Debug
+          mkdir artifact
+          mv AyuGram.app artifact/
+          [ -e Updater ] && mv Updater artifact/ || true
+
+      - name: Upload artifact.
+        uses: actions/upload-artifact@v7
+        with:
+          name: AyuGram-macOS-arm64-Debug
+          path: ${{ env.REPO_NAME }}/out/Debug/artifact/
+          retention-days: 7
